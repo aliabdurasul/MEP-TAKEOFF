@@ -1,0 +1,14 @@
+.venv/
+**/__pycache__/
+*.pyc
+.env
+.env.*
+.streamlit/secrets.toml
+*.log
+.DS_Store
+Thumbs.db
+data/converted/
+data/output/
+data/input/*.dwg
+data/input/*.dxf
+data/input/*.xlsx
