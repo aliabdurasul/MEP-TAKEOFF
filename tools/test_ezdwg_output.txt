@@ -1,0 +1,113 @@
+========================================
+EZDWG REAL DWG FEASIBILITY TEST
+========================================
+Python: 3.11.9
+ezdwg: C:\Users\user\Documents\gimtas\mep outomation\.venv\Lib\site-packages\ezdwg\__init__.py
+DWG: C:\Users\user\Documents\gimtas\mep outomation\data\input\MIR_OT_ANTP_R22_K2_8.dwg
+
+TEST 1 - OPEN DWG: PASS
+DWG version: AC1032
+DWG units: millimeters
+INSUNITS: 4
+modelspace available: yes
+
+TEST 2 - ENTITY INVENTORY: PASS
+header record count: 59471
+ENTITY TYPE              COUNT
+LINE                    40780
+LWPOLYLINE              1704
+POLYLINE                0
+ARC                     5799
+CIRCLE                  1
+ELLIPSE                 3762
+SPLINE                  1088
+INSERT                  2186
+TEXT                    3
+MTEXT                   1401
+OTHER                    2747
+TOTAL HEADERS              59471
+
+TEST 3 - LAYER HANDLES
+unique entity handles sampled from headers: 56724
+LINE | handle=374 | layer_handle=(via raw mapping)
+LINE | handle=375 | layer_handle=(via raw mapping)
+LINE | handle=376 | layer_handle=(via raw mapping)
+LINE | handle=377 | layer_handle=(via raw mapping)
+LINE | handle=378 | layer_handle=(via raw mapping)
+LINE | handle=379 | layer_handle=(via raw mapping)
+LINE | handle=380 | layer_handle=(via raw mapping)
+LINE | handle=381 | layer_handle=(via raw mapping)
+LINE | handle=382 | layer_handle=(via raw mapping)
+LINE | handle=383 | layer_handle=(via raw mapping)
+LINE | handle=384 | layer_handle=(via raw mapping)
+LINE | handle=385 | layer_handle=(via raw mapping)
+LINE | handle=386 | layer_handle=(via raw mapping)
+LINE | handle=387 | layer_handle=(via raw mapping)
+LINE | handle=388 | layer_handle=(via raw mapping)
+LINE | handle=389 | layer_handle=(via raw mapping)
+LINE | handle=390 | layer_handle=(via raw mapping)
+LINE | handle=391 | layer_handle=(via raw mapping)
+LINE | handle=392 | layer_handle=(via raw mapping)
+LINE | handle=393 | layer_handle=(via raw mapping)
+
+TEST 4 - RESOLVE LAYER NAMES
+layer table records: 52
+successfully resolved: 7
+unresolved: 45
+garbled examples:
+  149 -> 蛠袠蘀螠血褀衠蝀褀駠
+  150 -> 肐p
+  151 -> 蚠袠蠠襠蜠蘀蒠
+  152 -> 偃D聃
+  153 -> 蛀蜠蛀褠蘠螠螠覠虠蒠
+
+TEST 5 - RAW DATA INVESTIGATION
+handle 149: raw layer name=蛠袠蘀螠血褀衠蝀褀駠
+handle 150: raw layer name=肐p
+handle 151: raw layer name=蚠袠蠠襠蜠蘀蒠
+handle 152: raw layer name=偃D聃
+handle 153: raw layer name=蛀蜠蛀褠蘠螠螠覠虠蒠
+Conclusion: layer-name decoding is not reliable on this DWG using ezdwg's tested raw layer table output.
+
+TEST 6 - GEOMETRY
+decode_line_entities: count=5
+  first record: (374, 6.836296066788844e-305, 0.0, 2.869697958898351e-247, 0.0, -2.097657740130217, 1.81214843685561e-154)
+decode_arc_entities: count=5
+  first record: (6060, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+decode_circle_entities: count=1
+  first record: (71486, -1.0574874309554616e-15, 0.0, 0.0, 2.500000000000002)
+decode_lwpolyline_entities: count=5
+  first record: (27592, 256, [(-7.999999999989519, 127.9999999999839), (-8.095987200669128, 123.20127989758659), (-8.38379524366801, 118.41023672368243), (-8.862963697521218, 113.63453512531221), (-9.532725994913699, 108.8818152062748), (-10.392010659031644, 104.1596803045762), (-11.439443017741155, 99.4756848287283), (-12.673347402700802, 94.83732217228889), (-14.09174983009882, 90.2520127260483), (-15.692381158640183, 85.72709200697072), (-17.472680719637744, 81.26979892294435), (-19.429800413593878, 76.88726419206323), (-21.560609266472216, 72.58649893500538), (-23.861698438668487, 68.37438345873406), (-26.329386678381344, 64.25765624947609), (-28.95972621082424, 60.242903192578105), (-31.748509053870364, 56.336547036495396), (-34.691273749873744, 52.544837117766626), (-37.7833125030804, 48.87383936340631), (-41.01967871108184, 45.32942658671739), (-44.39519487833007, 41.9172690920393), (-47.90446089903158, 38.642825603481256), (-51.54186269615737, 35.511334532107774), (-55.30158120276888, 32.52780559561915), (-59.17760167129677, 29.697011803863404), (-63.163723295811614, 27.02348182303556), (-67.25356913205701, 24.51149273078323), (-71.4405962991322, 22.16506317378801), (-75.71810644678024, 19.987946938802775), (-80.07925647124186, 17.983626947371672), (-84.51706946279099, 16.155309683915597), (-89.02444586733125, 14.505920066039039), (-93.5941748441476, 13.038096765274947), (-98.21894580169844, 11.754187985789276), (-102.89136009302247, 10.65624770774383), (-107.60394285196149, 9.746032401368444), (-112.3491549514094, 9.02499821698142), (-117.119405064269, 8.494298655465116), (-121.90706180795404, 8.154782722913097), (-126.70446595299711, 8.006993572385557), (-127.99999999998823, 7.999999999983022)], [], [], None)
+decode_polyline_2d_entities: count=0
+  first record: None
+
+TEST 7 - QUANTITY SIMULATION
+grouping mode: layer_handle
+top-level quantity sample is based on raw decoder output only
+decode_line_entities: available=True
+decode_arc_entities: available=True
+decode_circle_entities: available=True
+decode_lwpolyline_entities: available=True
+decode_polyline_2d_entities: available=False
+
+TEST 8 - COMPARE WITH CURRENT DXF PIPELINE IF POSSIBLE
+DXF entity count: 4
+DXF entity types: {'LINE': 2, 'LWPOLYLINE': 1, 'CIRCLE': 1}
+DXF total measurable length: 60.000000
+DXF circle count: 1
+
+========================================
+EZDWG REAL DWG FEASIBILITY TEST
+========================================
+DWG OPEN: PASS
+ENTITY ITERATION: PASS
+ENTITY TYPES: PASS
+LAYER HANDLES: PASS
+LAYER NAME RESOLUTION: FAIL
+LINE GEOMETRY: PASS
+ARC GEOMETRY: PASS
+CIRCLE GEOMETRY: PASS
+POLYLINE GEOMETRY: PASS
+QUANTITY CALCULATION: PASS
+LAYER RESOLUTION: 0 / 52 successful
+OVERALL: NOT VIABLE

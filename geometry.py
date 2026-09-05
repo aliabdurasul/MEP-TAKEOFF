@@ -119,6 +119,66 @@ def measure_entity(entity: Any) -> tuple[float, bool, bool]:
     return 0.0, False, True
 
 
+def entity_geometry_signature(entity: Any) -> tuple | None:
+    entity_type = entity.dxftype()
+    if entity_type == "LINE":
+        start = entity.dxf.start
+        end = entity.dxf.end
+        start_point = tuple(round(float(value), 6) for value in (start.x, start.y))
+        end_point = tuple(round(float(value), 6) for value in (end.x, end.y))
+        return (entity_type, min(start_point, end_point), max(start_point, end_point))
+
+    if entity_type == "LWPOLYLINE":
+        points = tuple(
+            tuple(round(float(value), 6) for value in point[:2])
+            for point in entity.get_points("xy")
+        )
+        if not points:
+            return None
+        return (entity_type, min(points, points[::-1]), max(points, points[::-1]), bool(entity.closed))
+
+    if entity_type == "POLYLINE":
+        vertices = entity.vertices() if callable(getattr(entity, "vertices", None)) else getattr(entity, "vertices", [])
+        points = tuple(
+            tuple(round(float(value), 6) for value in (vertex.dxf.location.x, vertex.dxf.location.y))
+            for vertex in vertices
+        )
+        if not points:
+            return None
+        return (entity_type, min(points, points[::-1]), max(points, points[::-1]), bool(entity.is_closed))
+
+    if entity_type == "ARC":
+        center = entity.dxf.center
+        return (
+            entity_type,
+            tuple(round(float(value), 6) for value in (center.x, center.y)),
+            round(float(entity.dxf.radius), 6),
+            round(float(entity.dxf.start_angle), 6),
+            round(float(entity.dxf.end_angle), 6),
+        )
+
+    return None
+
+
+def deduplicate_entities(entities: Iterable[Any]) -> tuple[list[Any], list[Any]]:
+    unique_entities: list[Any] = []
+    duplicate_entities: list[Any] = []
+    seen_signatures: set[tuple] = set()
+
+    for entity in entities:
+        signature = entity_geometry_signature(entity)
+        if signature is None:
+            unique_entities.append(entity)
+            continue
+        if signature in seen_signatures:
+            duplicate_entities.append(entity)
+            continue
+        seen_signatures.add(signature)
+        unique_entities.append(entity)
+
+    return unique_entities, duplicate_entities
+
+
 def convert_length(value: float, meters_per_unit: float | None) -> float:
     if meters_per_unit is None:
         return value
