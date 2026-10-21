@@ -1,0 +1,91 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest (${{ matrix.os }}, Python 3.11)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Refuse committed CAD drawings
+        shell: bash
+        run: |
+          if git ls-files | grep -Ei '\.(dxf|dwg)$'; then
+            echo "::error::CAD drawings must not be committed to this repository"
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run tests
+        env:
+          MEP_VALIDATION_REPORT: validation-report/${{ matrix.os }}.md
+        run: python -m pytest
+
+      - name: Upload validation report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: validation-report-${{ matrix.os }}
+          path: validation-report/
+          if-no-files-found: warn
+
+  stale-upload-reproduction:
+    name: stale-upload bug reproduces with app.py from main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run the upload-flow test against main's app.py (must fail)
+        shell: bash
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          mkdir -p "$RUNNER_TEMP/legacy_app"
+          git show FETCH_HEAD:app.py > "$RUNNER_TEMP/legacy_app/app.py"
+          set +e
+          env -u GITHUB_STEP_SUMMARY MEP_APP_DIR="$RUNNER_TEMP/legacy_app" \
+            python -m pytest tests/test_app_upload_flow.py -p no:cacheprovider
+          status=$?
+          set -e
+          if [ "$status" -eq 1 ]; then
+            echo "main's app.py shows the previous drawing's total after a same-name re-upload (test failed as expected)."
+          else
+            echo "::error::Expected the upload-flow test to fail against main's app.py, got exit code $status"
+            exit 1
+          fi

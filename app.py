@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import contextlib
 import math
 import re
@@ -28,6 +27,8 @@ from geometry import (
 from ezdwg_reader import EZDWG_AVAILABLE, get_entities as get_dwg_entities
 from ezdwg_reader import get_layers as get_dwg_layers
 from ezdwg_reader import open_dwg, read_insunits as read_dwg_insunits
+from mep_takeoff.session_state import invalidate_report, register_upload, report_cache_key, reset_analysis_state
+from mep_takeoff.uploads import EmptyUploadError, sha256_bytes, store_upload
 
 
 APP_TITLE = "MEP Метраж V0"
@@ -118,22 +119,11 @@ def init_state() -> None:
 
 
 def reset_analysis() -> None:
-    st.session_state["drawing_kind"] = None
-    st.session_state["drawing_doc"] = None
-    st.session_state["dwg_entities"] = None
-    st.session_state["dxf_doc"] = None
-    st.session_state["insunits"] = None
-    st.session_state["layers_table"] = None
-    st.session_state["calculation"] = None
-    st.session_state["calculation_key"] = None
-    st.session_state["dxf_layer_calculation"] = None
-    st.session_state["dxf_layer_calculation_key"] = None
-    st.session_state["selected_layer"] = None
-    st.session_state["converted_path"] = None
+    reset_analysis_state(st.session_state)
 
 
 def file_signature(file_bytes: bytes) -> str:
-    return hashlib.sha256(file_bytes).hexdigest()
+    return sha256_bytes(file_bytes)
 
 
 def ensure_runtime_dirs() -> dict[str, Path]:
@@ -150,9 +140,7 @@ def ensure_runtime_dirs() -> dict[str, Path]:
 
 
 def load_uploaded_file(uploaded_file, runtime_dirs: dict[str, Path]) -> Path:
-    target = runtime_dirs["input"] / uploaded_file.name
-    target.write_bytes(uploaded_file.getvalue())
-    return target
+    return store_upload(uploaded_file.getvalue(), uploaded_file.name, runtime_dirs["input"]).path
 
 
 def get_effective_unit(automatic: dict, override: str) -> tuple[str, float | None, bool]:
@@ -1491,23 +1479,19 @@ def main() -> None:
         st.info("Загрузите DXF-файл для расчёта метража.")
         return
 
-    current_signature = file_signature(uploaded_file.getvalue())
-    if st.session_state.get("upload_signature") != current_signature:
-        st.session_state["upload_signature"] = current_signature
-        st.session_state["upload_name"] = uploaded_file.name
-        reset_analysis()
+    try:
+        register_upload(st.session_state, uploaded_file.getvalue(), uploaded_file.name, runtime_dirs["input"])
+    except EmptyUploadError:
+        st.error("Загруженный файл пуст.")
+        return
+    except Exception:
+        st.error("Не удалось сохранить загруженный файл.")
+        return
 
     st.success(f"Файл: {uploaded_file.name}")
     st.write("Статус: готово")
 
-    source_path = Path(st.session_state["source_path"]) if st.session_state.get("source_path") else None
-    if source_path is None or source_path.name != uploaded_file.name:
-        try:
-            source_path = load_uploaded_file(uploaded_file, runtime_dirs)
-            st.session_state["source_path"] = str(source_path)
-        except Exception:
-            st.error("Не удалось сохранить загруженный файл.")
-            return
+    source_path = Path(st.session_state["source_path"])
 
     if st.button("Загрузить чертёж", type="primary") or st.session_state.get("drawing_doc") is None:
         try:
@@ -1517,6 +1501,7 @@ def main() -> None:
             else:
                 st.success("DXF успешно загружен.")
         except Exception:
+            reset_analysis()
             if source_path.suffix.lower() == ".dwg":
                 st.error("DWG не удалось прочитать локально.")
             else:
@@ -1565,7 +1550,11 @@ def main() -> None:
     st.session_state["selected_layer"] = selected_layer
 
     if drawing_kind == "dwg":
-        report_key = (st.session_state.get("unit_override", "Auto"), insunits.get("code"))
+        report_key = report_cache_key(
+            st.session_state.get("upload_signature"),
+            st.session_state.get("unit_override", "Auto"),
+            insunits.get("code"),
+        )
         if st.button("Рассчитать метраж") or st.session_state.get("dwg_report") is None or st.session_state.get("dwg_report_key") != report_key:
             try:
                 dwg_entities = st.session_state.get("dwg_entities")
@@ -1575,6 +1564,7 @@ def main() -> None:
                 st.session_state["dwg_report"] = calculate_dwg_quantities(dwg_entities, unit_label, meters_per_unit)
                 st.session_state["dwg_report_key"] = report_key
             except Exception:
+                invalidate_report(st.session_state, "dwg_report")
                 st.error("Не удалось выполнить расчёт DWG-метража.")
                 return
 
@@ -1637,8 +1627,8 @@ def main() -> None:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     elif drawing_kind == "dxf":
-        report_key = (
-            uploaded_file.name,
+        report_key = report_cache_key(
+            st.session_state.get("upload_signature"),
             st.session_state.get("unit_override", "Auto"),
             insunits.get("code"),
             st.session_state.get("remove_duplicate_geometry", True),
@@ -1653,6 +1643,7 @@ def main() -> None:
                 )
                 st.session_state["dxf_report_key"] = report_key
             except Exception:
+                invalidate_report(st.session_state, "dxf_report")
                 st.error("Не удалось рассчитать MEP-метраж для DXF.")
                 return
 
@@ -1706,8 +1697,8 @@ def main() -> None:
                 hide_index=True,
             )
 
-        layer_report_key = (
-            uploaded_file.name,
+        layer_report_key = report_cache_key(
+            st.session_state.get("upload_signature"),
             selected_layer,
             st.session_state.get("unit_override", "Auto"),
             insunits.get("code"),
@@ -1724,6 +1715,7 @@ def main() -> None:
                 )
                 st.session_state["dxf_layer_calculation_key"] = layer_report_key
             except Exception:
+                invalidate_report(st.session_state, "dxf_layer_calculation")
                 st.error("Не удалось выполнить расчёт по выбранному слою.")
                 return
 
