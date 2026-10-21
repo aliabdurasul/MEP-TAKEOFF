@@ -38,15 +38,17 @@ from geometry import (  # noqa: E402
     entity_geometry_signature,
     measure_entity,
 )
+from mep_takeoff.diagnostics import (  # noqa: E402
+    OVERLAP_ANGLE_TOLERANCE,
+    OVERLAP_OFFSET_TOLERANCE,
+    collinear_overlaps,
+    insert_instance_count,
+    pipe_geometry_in_blocks,
+)
 
-MAX_BLOCK_DEPTH = 4
-ANGLE_TOLERANCE = 1e-7
-OFFSET_TOLERANCE = 1e-3
 LENGTH_TOLERANCE = 1e-6
 FLATTEN_DISTANCE = 0.5
-MARKER_BASE_THRESHOLD = 3000.0
 EQUIPMENT_TAG_LAYER = "Марки оборудования"
-OD_SYMBOLS = ("ø", "Ø", "⌀")
 DIAMETER_LIKE_RE = re.compile(r"%%[cC]|[ДдDd][уУuU]\s*\d|⌀|\b[dD]\s*\d")
 TOP_TEXTS = 20
 
@@ -178,53 +180,6 @@ def _same_bulges(first, second) -> bool:
     return forward == reversed_other
 
 
-def _straight_segments(entity):
-    kind = entity.dxftype()
-    if kind == "LINE":
-        start, end = entity.dxf.start, entity.dxf.end
-        yield (float(start.x), float(start.y)), (float(end.x), float(end.y))
-        return
-    if kind not in {"LWPOLYLINE", "POLYLINE"} or _is_mesh(entity):
-        return
-    points = _polyline_xyb(entity)
-    pairs = list(zip(points, points[1:]))
-    if _is_closed(entity) and len(points) > 1:
-        pairs.append((points[-1], points[0]))
-    for start, end in pairs:
-        if abs(start[2]) < 1e-12:
-            yield (start[0], start[1]), (end[0], end[1])
-
-
-def _collinear_key(start, end):
-    dx, dy = end[0] - start[0], end[1] - start[1]
-    if math.hypot(dx, dy) <= LENGTH_TOLERANCE:
-        return None
-    angle = math.atan2(dy, dx) % math.pi
-    if math.pi - angle < ANGLE_TOLERANCE:
-        angle = 0.0
-    cos_a, sin_a = math.cos(angle), math.sin(angle)
-    offset = -sin_a * start[0] + cos_a * start[1]
-    t1 = cos_a * start[0] + sin_a * start[1]
-    t2 = cos_a * end[0] + sin_a * end[1]
-    return (round(angle / ANGLE_TOLERANCE), round(offset / OFFSET_TOLERANCE)), (min(t1, t2), max(t1, t2))
-
-
-def _overlap(intervals) -> float:
-    total = sum(high - low for low, high in intervals)
-    union = 0.0
-    current = None
-    for low, high in sorted(intervals):
-        if current is None or low > current[1]:
-            if current is not None:
-                union += current[1] - current[0]
-            current = [low, high]
-        else:
-            current[1] = max(current[1], high)
-    if current is not None:
-        union += current[1] - current[0]
-    return total - union
-
-
 def _duplicates(ctx: _Context) -> dict[str, Any]:
     bulge_count, bulge_length = 0, 0.0
     for layer, kept in ctx.kept.items():
@@ -241,38 +196,7 @@ def _duplicates(ctx: _Context) -> dict[str, Any]:
                 bulge_count += 1
                 bulge_length += _length(duplicate)
 
-    by_layer_key: dict[tuple, list] = defaultdict(list)
-    types_by_layer_key: dict[tuple, set] = defaultdict(set)
-    by_key: dict[tuple, list] = defaultdict(list)
-    for layer, kept in ctx.kept.items():
-        for entity in kept:
-            kind = "LINE" if entity.dxftype() == "LINE" else "POLYLINE"
-            for start, end in _straight_segments(entity):
-                keyed = _collinear_key(start, end)
-                if keyed is None:
-                    continue
-                key, interval = keyed
-                by_layer_key[(layer, key)].append(interval)
-                types_by_layer_key[(layer, key)].add(kind)
-                by_key[key].append(interval)
-
-    same_layer_length, same_layer_segments, mixed_groups = 0.0, 0, 0
-    same_layer_by_key: dict[tuple, float] = defaultdict(float)
-    for (layer, key), intervals in by_layer_key.items():
-        overlap = _overlap(intervals)
-        if overlap > LENGTH_TOLERANCE:
-            same_layer_length += overlap
-            same_layer_segments += len(intervals)
-            same_layer_by_key[key] += overlap
-            if len(types_by_layer_key[(layer, key)]) > 1:
-                mixed_groups += 1
-
-    cross_layer_length, cross_layer_groups = 0.0, 0
-    for key, intervals in by_key.items():
-        cross = _overlap(intervals) - same_layer_by_key.get(key, 0.0)
-        if cross > LENGTH_TOLERANCE:
-            cross_layer_length += cross
-            cross_layer_groups += 1
+    overlaps = collinear_overlaps(ctx.kept)
 
     by_signature: dict[tuple, list] = defaultdict(list)
     for entity in ctx.kept_entities():
@@ -292,11 +216,11 @@ def _duplicates(ctx: _Context) -> dict[str, Any]:
             "length_m_or_du": round(float(summary["duplicate_raw_length"]), 6),
         },
         "removed_polylines_with_different_bulges": _amount(ctx.factor, bulge_count, bulge_length),
-        "collinear_overlap_same_layer": _amount(ctx.factor, same_layer_segments, same_layer_length),
-        "same_layer_overlap_groups_mixing_line_and_polyline": mixed_groups,
-        "collinear_overlap_across_layers": _amount(ctx.factor, cross_layer_groups, cross_layer_length),
+        "collinear_overlap_same_layer": _amount(ctx.factor, overlaps.same_layer_segments, overlaps.same_layer_length),
+        "same_layer_overlap_groups_mixing_line_and_polyline": overlaps.mixed_type_groups,
+        "collinear_overlap_across_layers": _amount(ctx.factor, overlaps.across_layers_groups, overlaps.across_layers_length),
         "exact_duplicates_across_layers": _amount(ctx.factor, exact_count, exact_length),
-        "tolerances": {"angle_rad": ANGLE_TOLERANCE, "offset_du": OFFSET_TOLERANCE},
+        "tolerances": {"angle_rad": OVERLAP_ANGLE_TOLERANCE, "offset_du": OVERLAP_OFFSET_TOLERANCE},
     }
 
 
@@ -340,7 +264,7 @@ def _diameters(ctx: _Context) -> dict[str, Any]:
         layer = app._dxf_layer_name(entity)
         if layer == app.DXF_DIAMETER_LAYER:
             if label:
-                symbols["OD (Ø/ø)" if any(symbol in text for symbol in OD_SYMBOLS) else "DN"] += 1
+                symbols["OD (Ø/ø)" if label.startswith("Ø") else "DN"] += 1
             elif DIAMETER_LIKE_RE.search(text):
                 unparsed_like[text[:40]] += 1
             else:
@@ -348,7 +272,8 @@ def _diameters(ctx: _Context) -> dict[str, Any]:
         elif label:
             outside[layer] += 1
 
-    markers = [marker for items in app._collect_dxf_diameter_markers(ctx.entities).values() for marker in items]
+    markers = app._dxf_diameter_markers(ctx.entities)
+    base_threshold = app._marker_settings(ctx.factor)[0]
     unknown_handles = {row["Handle"] for row in ctx.report["pipe_detail_rows"] if row["Diameter"] == "UNKNOWN"}
     unknown_count, unknown_length = 0, 0.0
     candidate_count, candidate_length, ambiguous = 0, 0.0, 0
@@ -363,7 +288,7 @@ def _diameters(ctx: _Context) -> dict[str, Any]:
         labels = {
             marker["label"]
             for marker in markers
-            if _distance_to_points(marker["point"], points) <= max(MARKER_BASE_THRESHOLD, float(marker.get("height") or 0.0) * 8.0)
+            if _distance_to_points(marker["point"], points) <= max(base_threshold, float(marker.get("height") or 0.0) * 8.0)
         }
         if labels:
             candidate_count += 1
@@ -390,46 +315,15 @@ def _diameters(ctx: _Context) -> dict[str, Any]:
             "count": len(ocs_handles),
             "unknown": sum(1 for handle in ocs_handles if handle in unknown_handles),
         },
-        "marker_threshold_m": None if ctx.factor is None else round(MARKER_BASE_THRESHOLD * ctx.factor, 6),
+        "marker_threshold_m": None if ctx.factor is None else round(base_threshold * ctx.factor, 6),
     }
 
 
 # --- KI-BLK -------------------------------------------------------------------------------------
 
 
-def _pipe_geometry_in_insert(insert, effective_layer: str, depth: int) -> tuple[float, int, int, int]:
-    try:
-        children = list(insert.virtual_entities())
-    except Exception:
-        return 0.0, 0, 0, 1
-    length, count, unsupported, failures = 0.0, 0, 0, 0
-    for child in children:
-        layer = str(child.dxf.get("layer", "0") or "0")
-        if layer == "0":
-            layer = effective_layer
-        if child.dxftype() == "INSERT":
-            if depth >= MAX_BLOCK_DEPTH:
-                failures += 1
-                continue
-            instances = list(child.multi_insert()) if int(getattr(child, "mcount", 1) or 1) > 1 else [child]
-            for instance in instances:
-                sub = _pipe_geometry_in_insert(instance, layer, depth + 1)
-                length, count, unsupported, failures = length + sub[0], count + sub[1], unsupported + sub[2], failures + sub[3]
-            continue
-        if not app._is_dxf_pipe_layer(layer):
-            continue
-        raw_length, measurable, ignored = measure_entity(child)
-        if measurable and not ignored:
-            length += raw_length
-            count += 1
-        else:
-            unsupported += 1
-    return length, count, unsupported, failures
-
-
 def _blocks(ctx: _Context) -> dict[str, Any]:
-    hidden_length, hidden_count, hidden_unsupported, failures, inserts_with_pipe = 0.0, 0, 0, 0, 0
-    minsert_extra: Counter = Counter()
+    minsert_instances: Counter = Counter()
     valve_dropped: Counter = Counter()
     anonymous: Counter = Counter()
     not_counted: Counter = Counter()
@@ -439,9 +333,9 @@ def _blocks(ctx: _Context) -> dict[str, Any]:
         name = str(insert.dxf.name)
         classification = app._classify_dxf_insert(insert)
         label = "not counted" if classification is None else "/".join(classification)
-        mcount = int(getattr(insert, "mcount", 1) or 1)
+        mcount = insert_instance_count(insert)
         if mcount > 1:
-            minsert_extra[label] += mcount - 1
+            minsert_instances[label] += mcount
         if layer == EQUIPMENT_TAG_LAYER:
             tag_inserts += 1
         if layer in app.DXF_VALVE_LAYERS and classification is None:
@@ -451,23 +345,17 @@ def _blocks(ctx: _Context) -> dict[str, Any]:
         if name.startswith("*"):
             anonymous[f"{layer} -> {label}"] += 1
 
-        found = 0
-        for instance in list(insert.multi_insert()) if mcount > 1 else [insert]:
-            length, count, unsupported, failed = _pipe_geometry_in_insert(instance, layer, 0)
-            hidden_length += length
-            hidden_count += count
-            hidden_unsupported += unsupported
-            failures += failed
-            found += count
-        if found:
-            inserts_with_pipe += 1
+    blocks = pipe_geometry_in_blocks(ctx.doc, is_pipe_layer=app._is_dxf_pipe_layer, layer_of=app._dxf_layer_name, measure=measure_entity)
+    hidden_count, hidden_length = blocks["entity_count"], blocks["length_du"]
+    hidden_unsupported, failures = blocks["unsupported"], blocks["failures"]
+    inserts_with_pipe = sum(row["Inserts"] for row in blocks["rows"])
 
     return {
         "pipe_geometry_inside_blocks_not_measured": _amount(ctx.factor, hidden_count, hidden_length),
         "inserts_containing_pipe_geometry": inserts_with_pipe,
         "unsupported_entities_inside_blocks_on_pipe_layers": hidden_unsupported,
         "block_expansion_failures": failures,
-        "minsert_instances_not_counted": dict(minsert_extra),
+        "minsert_instances": dict(minsert_instances),
         "equipment_tag_layer_inserts_counted_as_equipment": tag_inserts,
         "valve_layer_inserts_dropped": dict(valve_dropped),
         "inserts_not_counted_by_layer": dict(not_counted),
