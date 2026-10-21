@@ -47,6 +47,10 @@ jobs:
           MEP_VALIDATION_REPORT: validation-report/${{ matrix.os }}.md
         run: python -m pytest
 
+      - name: Publish validation report as annotations
+        if: always()
+        run: python .github/scripts/publish_validation_annotations.py validation-report/${{ matrix.os }}.json "${{ matrix.os }}"
+
       - name: Upload validation report
         if: always()
         uses: actions/upload-artifact@v7
@@ -80,9 +84,11 @@ jobs:
           git show FETCH_HEAD:app.py > "$RUNNER_TEMP/legacy_app/app.py"
           set +e
           env -u GITHUB_STEP_SUMMARY MEP_APP_DIR="$RUNNER_TEMP/legacy_app" \
+            MEP_VALIDATION_REPORT="$RUNNER_TEMP/legacy-report/legacy.md" \
             python -m pytest tests/test_app_upload_flow.py -p no:cacheprovider
           status=$?
           set -e
+          python .github/scripts/publish_validation_annotations.py "$RUNNER_TEMP/legacy-report/legacy.json" "main app.py (legacy)"
           if [ "$status" -eq 1 ]; then
             echo "main's app.py shows the previous drawing's total after a same-name re-upload (test failed as expected)."
           else
