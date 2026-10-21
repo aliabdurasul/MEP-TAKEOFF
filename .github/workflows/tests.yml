@@ -53,8 +53,9 @@ jobs:
         run: |
           git fetch --no-tags --depth=1 origin main
           mkdir -p .baseline
-          git show FETCH_HEAD:app.py > .baseline/app.py
-          git show FETCH_HEAD:excel_export.py > .baseline/excel_export.py
+          for module in app.py excel_export.py geometry.py dxf_reader.py; do
+            git show "FETCH_HEAD:$module" > ".baseline/$module"
+          done
           echo "MEP_BASELINE_DIR=.baseline" >> "$GITHUB_ENV"
 
       - name: Run tests

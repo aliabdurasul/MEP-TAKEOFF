@@ -135,6 +135,11 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(pytest.mark.skip(reason=PRIVATE_SKIP_REASON))
 
 
+def pytest_collectreport(report):
+    if report.failed:
+        _OUTCOMES[report.nodeid or "collection"] = {"outcome": "error (collection)", "note": _failure_message(report)}
+
+
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_makereport(item, call):
     report = yield

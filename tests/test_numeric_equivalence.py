@@ -13,6 +13,7 @@ import importlib.util
 import io
 import math
 import os
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -63,6 +64,9 @@ DIAMETER_CHANGE_PATHS = {
 }
 
 
+BASELINE_DEPENDENCIES = ("geometry", "dxf_reader", "excel_export")
+
+
 def _load(module_name: str, file_name: str):
     spec = importlib.util.spec_from_file_location(module_name, BASELINE_DIR / file_name)
     module = importlib.util.module_from_spec(spec)
@@ -71,13 +75,48 @@ def _load(module_name: str, file_name: str):
 
 
 @pytest.fixture(scope="module")
-def baseline_app():
-    return _load("baseline_app", "app.py")
+def baseline_modules():
+    """main's app.py bound to main's geometry, dxf_reader and excel_export (not this branch's)."""
+
+    loaded = {name: _load(f"baseline_{name}", f"{name}.py") for name in BASELINE_DEPENDENCIES}
+    saved = {name: sys.modules.get(name) for name in BASELINE_DEPENDENCIES}
+    try:
+        sys.modules.update(loaded)
+        loaded["app"] = _load("baseline_app", "app.py")
+    finally:
+        for name, module in saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+    return loaded
 
 
 @pytest.fixture(scope="module")
-def baseline_excel():
-    return _load("baseline_excel_export", "excel_export.py")
+def baseline_app(baseline_modules):
+    return baseline_modules["app"]
+
+
+@pytest.fixture(scope="module")
+def baseline_excel(baseline_modules):
+    return baseline_modules["excel_export"]
+
+
+def test_baseline_uses_main_modules(baseline_modules, validation):
+    """The baseline app is bound to main's geometry, not to this branch's."""
+    import geometry
+
+    validation.equal(
+        "EQ-BASE-01",
+        "baseline isolation",
+        expected=(True, False),
+        actual=(
+            baseline_modules["app"].measure_entity is baseline_modules["geometry"].measure_entity,
+            baseline_modules["app"].measure_entity is geometry.measure_entity,
+        ),
+        basis="baseline app.measure_entity identity",
+        kind="EQUIVALENCE",
+    )
 
 
 def _normalise(key, value):
@@ -87,7 +126,10 @@ def _normalise(key, value):
 
 
 def _project_rows(rows, keys):
-    return [{key: _normalise(key, row.get(key)) for key in sorted(keys)} for row in rows]
+    """Rows restricted to main's columns, labels normalised, order-insensitive (V1 sorts diameters naturally)."""
+
+    projected = [{key: _normalise(key, row.get(key)) for key in sorted(keys)} for row in rows]
+    return sorted(projected, key=repr)
 
 
 def _differences(new: dict, old: dict) -> list[str]:
@@ -309,7 +351,8 @@ def _normalise_frame(frame: pd.DataFrame) -> pd.DataFrame:
     for column in ("Диаметр", "Diameter", "Nearest Marker Label"):
         if column in frame.columns:
             frame[column] = [_normalise("Diameter", value) for value in frame[column]]
-    return frame
+    frame = frame.astype(str)
+    return frame.sort_values(list(frame.columns)).reset_index(drop=True) if len(frame.columns) else frame
 
 
 def _common_column_differences(new: dict, old: dict) -> tuple[list[str], list[str], list[str]]:
