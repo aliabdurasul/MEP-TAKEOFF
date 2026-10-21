@@ -149,11 +149,18 @@ def pytest_runtest_makereport(item, call):
         else:
             entry["outcome"] = report.outcome
             if report.failed:
-                entry["note"] = _first_line(report.longreprtext)
+                entry["note"] = _failure_message(report)
     elif report.failed:
         entry["outcome"] = f"error ({report.when})"
-        entry["note"] = _first_line(report.longreprtext)
+        entry["note"] = _failure_message(report)
     return report
+
+
+def _failure_message(report) -> str:
+    crash = getattr(report.longrepr, "reprcrash", None)
+    if crash is not None and getattr(crash, "message", None):
+        return _first_line(crash.message)
+    return _first_line(report.longreprtext)
 
 
 def _skip_reason(report) -> str:

@@ -27,6 +27,14 @@ from geometry import (
 from ezdwg_reader import EZDWG_AVAILABLE, get_entities as get_dwg_entities
 from ezdwg_reader import get_layers as get_dwg_layers
 from ezdwg_reader import open_dwg, read_insunits as read_dwg_insunits
+from mep_takeoff.diagnostics import (
+    LENGTH_UNIT_METRES,
+    external_references,
+    length_unit,
+    takeoff_warnings,
+    unsupported_pipe_entities,
+    xref_dependent_layer_count,
+)
 from mep_takeoff.session_state import invalidate_report, register_upload, report_cache_key, reset_analysis_state
 from mep_takeoff.uploads import EmptyUploadError, sha256_bytes, store_upload
 
@@ -761,6 +769,11 @@ def _is_dxf_pipe_layer(layer_name: str) -> bool:
     return layer_name.startswith(DXF_PIPE_LAYER_PREFIX) and layer_name not in DXF_PIPE_LAYER_EXCLUDES
 
 
+def _is_measured_entity(entity) -> bool:
+    _raw_length, measurable, ignored = measure_entity(entity)
+    return measurable and not ignored
+
+
 def _validate_pipe_invariants(total_pipe_length: float, pipe_rows: list[dict], pipe_detail_rows: list[dict], pipe_entity_count: int) -> None:
     if pipe_rows:
         diameter_total = sum(float(row.get("Length (m)") or 0.0) for row in pipe_rows)
@@ -1260,8 +1273,6 @@ def calculate_dxf_quantities(
         {"Diameter": diameter, "Length (m)": round(total, 6)}
         for diameter, total in sorted(pipes_by_diameter.items(), key=lambda item: item[0])
     ]
-    if not pipe_rows:
-        pipe_rows = [{"Diameter": "UNKNOWN", "Length (m)": 0.0}]
 
     total_pipe_length = math.fsum(value for value in pipes_by_diameter.values() if math.isfinite(value))
     raw_pipe_length = math.fsum(value for value in layer_raw_length.values() if math.isfinite(value))
@@ -1381,6 +1392,22 @@ def calculate_dxf_quantities(
         ],
     }
 
+    unsupported_rows = unsupported_pipe_entities(
+        entities,
+        is_pipe_layer=_is_dxf_pipe_layer,
+        layer_of=_dxf_layer_name,
+        is_measured=_is_measured_entity,
+    )
+    xref_rows = external_references(doc)
+    warnings = takeoff_warnings(
+        meters_per_unit=meters_per_unit,
+        pipe_entity_count=pipe_entity_count,
+        pipe_layers_label=f"{DXF_PIPE_LAYER_PREFIX}*, кроме {', '.join(sorted(DXF_PIPE_LAYER_EXCLUDES))}",
+        unsupported_rows=unsupported_rows,
+        xref_rows=xref_rows,
+        xref_layer_count=xref_dependent_layer_count(doc),
+    )
+
     return {
         "summary": {
             "total_pipe_length": total_pipe_length,
@@ -1400,6 +1427,8 @@ def calculate_dxf_quantities(
             "x_total_length": summary_by_category["X"],
             "z_total_length": summary_by_category["Z"],
             "unknown_category_length": summary_by_category["UNKNOWN"],
+            "length_unit": length_unit(meters_per_unit),
+            "unsupported_pipe_entity_count": int(sum(row["Count"] for row in unsupported_rows)),
         },
         "pipe_rows": pipe_rows,
         "pipe_by_diameter_rows": pipe_by_diameter_rows,
@@ -1411,6 +1440,9 @@ def calculate_dxf_quantities(
         "valves_rows": valves_rows,
         "layers_rows": layers_rows,
         "debug": debug,
+        "warnings": warnings,
+        "unsupported_pipe_entities": unsupported_rows,
+        "xrefs": xref_rows,
     }
 
 
@@ -1439,6 +1471,62 @@ def plot_selected_layer(entities) -> None:
     ax.set_title("Геометрия выбранного слоя")
     ax.grid(True, alpha=0.3)
     st.pyplot(fig, clear_figure=True)
+
+
+def build_dxf_takeoff_excel(*, file_name: str, report: dict, layer_calculation: dict, selected_layer: str, display_unit: str) -> bytes:
+    length_unit_known = report["summary"].get("length_unit", LENGTH_UNIT_METRES) == LENGTH_UNIT_METRES
+    total_column = "Total Pipe Length (m)" if length_unit_known else "Total Pipe Length (drawing units)"
+    return build_takeoff_excel(
+        file_name=file_name,
+        summary_rows=[
+            {
+                total_column: round(report["summary"]["total_pipe_length"], 6),
+                "Pipe Entities": report["summary"]["pipe_entity_count"],
+                "Equipment Count": report["summary"]["equipment_count"],
+                "Fittings Count": report["summary"]["fittings_count"],
+                "Valves Count": report["summary"]["valves_count"],
+                "Unit": display_unit,
+                "Duplicates Removed": sum(report["debug"].get("duplicate_entities_by_layer", {}).values()),
+                "Duplicate Length": round(report["summary"].get("duplicate_raw_length", 0.0), 6),
+                "Raw Length": round(report["summary"].get("raw_prefixed_pipe_length", 0.0), 6),
+                "Excluded Entities": report["summary"].get("excluded_pipe_geometry_count", 0),
+                "Excluded Length": round(report["summary"].get("excluded_pipe_geometry_length", 0.0), 6),
+                "Final Length": round(report["summary"]["total_pipe_length"], 6),
+            }
+        ],
+        pipe_by_diameter_rows=report["pipe_by_diameter_rows"],
+        pipes_rows=report["pipe_rows"],
+        pipes_detail_rows=report["pipe_detail_rows"],
+        equipment_rows=report["equipment_rows"],
+        fittings_rows=report["fittings_rows"],
+        valves_rows=report["valves_rows"],
+        layers_rows=report["layers_rows"],
+        details=layer_calculation["detail_rows"],
+        layer_name=selected_layer,
+        details_duplicate_count=layer_calculation["duplicate_entities"],
+        details_duplicate_raw_length=layer_calculation["duplicate_raw_length"],
+        details_duplicate_converted_length=layer_calculation["duplicate_converted_length"],
+        object_type_rows=layer_calculation["object_type_rows"],
+        unknown_review_rows=report.get("unknown_review_rows", []),
+        warning_rows=report.get("warnings", []),
+        unsupported_rows=report.get("unsupported_pipe_entities", []),
+        length_unit_known=length_unit_known,
+    )
+
+
+def render_takeoff_warnings(report: dict) -> None:
+    warnings = report.get("warnings") or []
+    if not warnings:
+        return
+    st.markdown("### Предупреждения")
+    for warning in warnings:
+        st.warning(f"{warning['Code']}: {warning['Message']}")
+    unsupported_rows = report.get("unsupported_pipe_entities") or []
+    if unsupported_rows:
+        st.dataframe(pd.DataFrame(unsupported_rows), use_container_width=True, hide_index=True)
+    xref_rows = report.get("xrefs") or []
+    if xref_rows:
+        st.dataframe(pd.DataFrame(xref_rows), use_container_width=True, hide_index=True)
 
 
 def main() -> None:
@@ -1657,9 +1745,15 @@ def main() -> None:
         st.write(f"Фитинги: {report['summary']['fittings_count']}")
         st.write(f"Клапаны: {report['summary']['valves_count']}")
 
+        render_takeoff_warnings(report)
+        length_header = "Length (m)" if meters_per_unit is not None else "Length (drawing units)"
+
         st.markdown("### Метод расчёта")
         st.write("Общая длина труб: сумма измеряемой DXF-геометрии трубных объектов.")
-        st.write("Единицы: миллиметры → метры по INSUNITS чертежа.")
+        if meters_per_unit is None:
+            st.write("Единицы: не определены — длины показаны в единицах чертежа, перевод в метры не выполнен.")
+        else:
+            st.write(f"Единицы: {unit_label} → метры (1 единица чертежа = {meters_per_unit:g} м).")
         st.write("Диаметр: определяется по доступным маркерам DXF и детерминированной связи с геометрией.")
         st.write("Неопределённые значения: не угадываются и помещаются в UNKNOWN.")
 
@@ -1669,7 +1763,7 @@ def main() -> None:
             st.info("Не обнаружено")
         else:
             st.dataframe(
-                pipes_df[["Diameter", "Length (m)"]],
+                pipes_df[["Diameter", "Length (m)"]].rename(columns={"Length (m)": length_header}),
                 use_container_width=True,
                 hide_index=True,
             )
@@ -1681,7 +1775,9 @@ def main() -> None:
         if not pipe_detail_df.empty:
             st.markdown("### Детальная таблица труб")
             st.dataframe(
-                pipe_detail_df[["Diameter", "Length (m)", "Handle", "Layer", "Entity Type", "Diameter Source", "Status", "Reason"]],
+                pipe_detail_df[["Diameter", "Length (m)", "Handle", "Layer", "Entity Type", "Diameter Source", "Status", "Reason"]].rename(
+                    columns={"Length (m)": length_header}
+                ),
                 use_container_width=True,
                 hide_index=True,
             )
@@ -1690,9 +1786,9 @@ def main() -> None:
         if not unknown_df.empty:
             st.markdown("### UNKNOWN REVIEW")
             st.write(f"Unknown objects: {len(unknown_df)}")
-            st.write(f"Unknown length: {float(unknown_df['Length (m)'].sum()):.6f} m")
+            st.write(f"Unknown length: {float(unknown_df['Length (m)'].sum()):.6f} {display_unit}")
             st.dataframe(
-                unknown_df[["Handle", "Layer", "Entity Type", "Length (m)", "Reason", "Status"]],
+                unknown_df[["Handle", "Layer", "Entity Type", "Length (m)", "Reason", "Status"]].rename(columns={"Length (m)": length_header}),
                 use_container_width=True,
                 hide_index=True,
             )
@@ -1754,38 +1850,12 @@ def main() -> None:
         st.markdown("### Предпросмотр геометрии")
         plot_selected_layer(get_layer_entities(doc, selected_layer))
 
-        excel_bytes = build_takeoff_excel(
+        excel_bytes = build_dxf_takeoff_excel(
             file_name=uploaded_file.name,
-            summary_rows=[
-                {
-                    "Total Pipe Length (m)": round(report["summary"]["total_pipe_length"], 6),
-                    "Pipe Entities": report["summary"]["pipe_entity_count"],
-                    "Equipment Count": report["summary"]["equipment_count"],
-                    "Fittings Count": report["summary"]["fittings_count"],
-                    "Valves Count": report["summary"]["valves_count"],
-                    "Unit": display_unit,
-                    "Duplicates Removed": sum(report["debug"].get("duplicate_entities_by_layer", {}).values()),
-                    "Duplicate Length": round(report["summary"].get("duplicate_raw_length", 0.0), 6),
-                    "Raw Length": round(report["summary"].get("raw_prefixed_pipe_length", 0.0), 6),
-                    "Excluded Entities": report["summary"].get("excluded_pipe_geometry_count", 0),
-                    "Excluded Length": round(report["summary"].get("excluded_pipe_geometry_length", 0.0), 6),
-                    "Final Length": round(report["summary"]["total_pipe_length"], 6),
-                }
-            ],
-            pipe_by_diameter_rows=report["pipe_by_diameter_rows"],
-            pipes_rows=report["pipe_rows"],
-            pipes_detail_rows=report["pipe_detail_rows"],
-            equipment_rows=report["equipment_rows"],
-            fittings_rows=report["fittings_rows"],
-            valves_rows=report["valves_rows"],
-            layers_rows=report["layers_rows"],
-            details=layer_calculation["detail_rows"],
-            layer_name=selected_layer,
-            details_duplicate_count=layer_calculation["duplicate_entities"],
-            details_duplicate_raw_length=layer_calculation["duplicate_raw_length"],
-            details_duplicate_converted_length=layer_calculation["duplicate_converted_length"],
-            object_type_rows=layer_calculation["object_type_rows"],
-            unknown_review_rows=report.get("unknown_review_rows", []),
+            report=report,
+            layer_calculation=layer_calculation,
+            selected_layer=selected_layer,
+            display_unit=display_unit,
         )
 
         st.download_button(
