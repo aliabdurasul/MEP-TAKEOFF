@@ -48,6 +48,15 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements-dev.txt
 
+      - name: Extract main's calculation modules for the equivalence tests
+        shell: bash
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          mkdir -p .baseline
+          git show FETCH_HEAD:app.py > .baseline/app.py
+          git show FETCH_HEAD:excel_export.py > .baseline/excel_export.py
+          echo "MEP_BASELINE_DIR=.baseline" >> "$GITHUB_ENV"
+
       - name: Run tests
         env:
           MEP_VALIDATION_REPORT: validation-report/${{ matrix.os }}.md

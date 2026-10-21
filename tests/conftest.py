@@ -32,6 +32,8 @@ KINDS = {
     "BEHAVIOR": "current V0 behaviour (not a correctness claim)",
     "KNOWN-ISSUE": "math/engineering expectation the program currently violates (strict xfail)",
     "UPLOAD": "upload storage and cache reliability",
+    "WARNING": "user-visible warnings and unit labels (no quantity change)",
+    "EQUIVALENCE": "quantities identical to the calculation on main",
 }
 
 

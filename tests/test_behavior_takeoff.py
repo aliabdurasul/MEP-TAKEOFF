@@ -500,18 +500,6 @@ def test_corrupt_file_raises(tmp_path, validation):
     validation.equal("BEH-ERR-02", "corrupt file", expected=True, actual=raised is not None, basis=f"23-byte text file (raised {raised})")
 
 
-def test_empty_drawing_placeholder_row(validation):
-    """An empty drawing yields total 0 and a placeholder 'UNKNOWN 0.0' diameter row."""
-    report = _takeoff(new_doc(INSUNITS_MM))
-    validation.equal(
-        "BEH-ERR-03",
-        "empty drawing output",
-        expected=(0.0, [{"Diameter": "UNKNOWN", "Length (m)": 0.0}]),
-        actual=(report["summary"]["total_pipe_length"], report["pipe_rows"]),
-        basis="R2018 DXF with no entities",
-    )
-
-
 def test_unknown_units_report_raw_lengths(validation):
     """With unknown units the totals stay in drawing units (no conversion)."""
     doc = new_doc(INSUNITS_UNKNOWN)

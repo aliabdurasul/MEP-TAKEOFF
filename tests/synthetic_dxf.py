@@ -90,6 +90,24 @@ def add_mtext(doc, text: str, insert, char_height: float = 2.5, layer: str = MAR
     return doc.modelspace().add_mtext(text, dxfattribs={"layer": layer, "insert": insert, "char_height": char_height})
 
 
+def add_spline(doc, fit_points, layer: str = PIPE_LAYER):
+    ensure_layer(doc, layer)
+    return doc.modelspace().add_spline(fit_points=list(fit_points), dxfattribs={"layer": layer})
+
+
+def add_ellipse(doc, center, major_axis, ratio: float, layer: str = PIPE_LAYER):
+    ensure_layer(doc, layer)
+    return doc.modelspace().add_ellipse(center=center, major_axis=major_axis, ratio=ratio, dxfattribs={"layer": layer})
+
+
+def add_xref(doc, filename: str, name: str, insert_at=None, layer: str = "0"):
+    doc.add_xref_def(filename, name)
+    if insert_at is None:
+        return None
+    ensure_layer(doc, layer)
+    return doc.modelspace().add_blockref(name, insert_at, dxfattribs={"layer": layer})
+
+
 def define_block(doc, name: str, lines: Iterable = (), line_layer: str = "0"):
     if name not in doc.blocks:
         block = doc.blocks.new(name=name)

@@ -17,7 +17,6 @@ from synthetic_dxf import (
     EQUIPMENT_TAG_LAYER,
     INSUNITS_M,
     INSUNITS_MM,
-    INSUNITS_UNKNOWN,
     MM_TO_M,
     PIPE_LAYER,
     RISER_LAYER,
@@ -274,36 +273,6 @@ def test_unrecognised_valve_layer_block_reported(validation):
     )
 
 
-@pytest.mark.xfail(reason="KI-XREF: external references are ignored without a warning", strict=True)
-def test_xref_produces_warning(validation):
-    """An attached external reference is reported to the user."""
-    doc = new_doc(INSUNITS_MM)
-    doc.add_xref_def("pipes_xref.dxf", "PIPES_XREF")
-    doc.modelspace().add_blockref("PIPES_XREF", (0, 0))
-    report = _takeoff(doc)
-    mentioned = "xref" in repr(report).lower()
-    validation.equal(
-        "KI-XREF-01", "xref warning", expected=True, actual=mentioned,
-        basis="XREF 'PIPES_XREF' -> pipes_xref.dxf inserted in model space", kind="KNOWN-ISSUE",
-    )
-
-
-@pytest.mark.xfail(reason="KI-UNS: unsupported entities on pipe layers are neither measured nor reported", strict=True)
-def test_unsupported_pipe_entities_reported(validation):
-    """SPLINE and ELLIPSE on a pipe layer appear in the report (measured or flagged)."""
-    doc = new_doc(INSUNITS_MM)
-    ensure_layer(doc, PIPE_LAYER)
-    spline = doc.modelspace().add_spline(fit_points=[(0, 0), (1000, 500), (2000, 0)], dxfattribs={"layer": PIPE_LAYER})
-    ellipse = doc.modelspace().add_ellipse(center=(5000, 0), major_axis=(1000, 0), ratio=0.5, dxfattribs={"layer": PIPE_LAYER})
-    report = _takeoff(doc)
-    reported = {row["Handle"] for row in report["pipe_detail_rows"]} | {row["Handle"] for row in report["unknown_review_rows"]}
-    validation.equal(
-        "KI-UNS-01", "unsupported entity visibility", expected=2,
-        actual=len({spline.dxf.handle, ellipse.dxf.handle} & reported),
-        basis="SPLINE + ELLIPSE on П_Трубы", kind="KNOWN-ISSUE",
-    )
-
-
 # --- B.10 layer filters / B.4 closed polylines ------------------------------------------------
 
 
@@ -326,30 +295,4 @@ def test_closed_polyline_matches_documented_rule(validation):
     validation.close(
         "KI-POL-01", "closed polyline rule consistency", expected=0.0, actual=_takeoff(doc)["summary"]["total_pipe_length"],
         basis="closed 1000x1000 LWPOLYLINE on П_Трубы", kind="KNOWN-ISSUE",
-    )
-
-
-# --- B.12 user warnings ------------------------------------------------------------------------
-
-
-@pytest.mark.xfail(reason="KI-WARN: drawing-unit lengths are labelled 'Length (m)'", strict=True)
-def test_unknown_units_not_labelled_metres(validation):
-    """Without known units the length column must not claim metres."""
-    doc = new_doc(INSUNITS_UNKNOWN)
-    add_line(doc, (0, 0), (3000, 4000))
-    report = _takeoff(doc, factor=None)
-    length_key = [key for key in report["pipe_rows"][0] if key.startswith("Length")]
-    validation.equal(
-        "KI-WARN-01", "unit label for unknown units", expected=["Length (drawing units)"], actual=length_key,
-        basis="$INSUNITS=0, LINE 5000 units", kind="KNOWN-ISSUE",
-    )
-
-
-@pytest.mark.xfail(reason="KI-WARN: an empty drawing returns a placeholder row instead of a warning", strict=True)
-def test_empty_drawing_has_no_placeholder(validation):
-    """A drawing without pipe geometry yields no diameter rows (and should warn)."""
-    report = _takeoff(new_doc(INSUNITS_MM))
-    validation.equal(
-        "KI-WARN-02", "empty drawing", expected=[], actual=report["pipe_rows"],
-        basis="R2018 DXF with no entities", kind="KNOWN-ISSUE",
     )
