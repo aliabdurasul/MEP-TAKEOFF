@@ -108,6 +108,8 @@ def measure_entity(entity: Any) -> tuple[float, bool, bool]:
         return polyline_length(_lwpolyline_points(entity), bool(entity.closed)), True, False
 
     if entity_type == "POLYLINE":
+        if is_mesh_polyline(entity):
+            return 0.0, False, True
         return polyline_length(_polyline_points(entity), bool(entity.is_closed)), True, False
 
     if entity_type == "ARC":
@@ -117,6 +119,43 @@ def measure_entity(entity: Any) -> tuple[float, bool, bool]:
         return 0.0, False, False
 
     return 0.0, False, True
+
+
+def is_mesh_polyline(entity: Any) -> bool:
+    return bool(getattr(entity, "is_poly_face_mesh", False) or getattr(entity, "is_polygon_mesh", False))
+
+
+def measure_entity_3d(entity: Any) -> float:
+    """True 3D length for LINE and 3D POLYLINE; planar entities return their in-plane length."""
+
+    entity_type = entity.dxftype()
+    if entity_type == "LINE":
+        start, end = entity.dxf.start, entity.dxf.end
+        return math.dist((float(start.x), float(start.y), float(start.z)), (float(end.x), float(end.y), float(end.z)))
+    if entity_type == "POLYLINE" and getattr(entity, "is_3d_polyline", False) and not is_mesh_polyline(entity):
+        points = [
+            (float(vertex.dxf.location.x), float(vertex.dxf.location.y), float(vertex.dxf.location.z))
+            for vertex in entity.vertices
+        ]
+        if entity.is_closed and len(points) > 1:
+            points.append(points[0])
+        return sum(math.dist(a, b) for a, b in zip(points, points[1:]))
+    return measure_entity(entity)[0]
+
+
+def _polyline_identity(points: list[tuple[float, float, float]], closed: bool) -> tuple:
+    """Vertices plus segment bulges, independent of drawing direction."""
+
+    coordinates = tuple((round(x, 6), round(y, 6)) for x, y, _bulge in points)
+    bulges = [round(bulge, 9) + 0.0 for _x, _y, bulge in points]
+    segment_bulges = bulges if closed else bulges[:-1]
+    if closed and segment_bulges:
+        reversed_bulges = [-value + 0.0 for value in reversed(segment_bulges[:-1])] + [-segment_bulges[-1] + 0.0]
+    else:
+        reversed_bulges = [-value + 0.0 for value in reversed(segment_bulges)]
+    forward = (coordinates, tuple(segment_bulges))
+    backward = (coordinates[::-1], tuple(reversed_bulges))
+    return min(forward, backward)
 
 
 def entity_geometry_signature(entity: Any) -> tuple | None:
@@ -129,23 +168,16 @@ def entity_geometry_signature(entity: Any) -> tuple | None:
         return (entity_type, min(start_point, end_point), max(start_point, end_point))
 
     if entity_type == "LWPOLYLINE":
-        points = tuple(
-            tuple(round(float(value), 6) for value in point[:2])
-            for point in entity.get_points("xy")
-        )
+        points = _lwpolyline_points(entity)
         if not points:
             return None
-        return (entity_type, min(points, points[::-1]), max(points, points[::-1]), bool(entity.closed))
+        return (entity_type, _polyline_identity(points, bool(entity.closed)), bool(entity.closed))
 
     if entity_type == "POLYLINE":
-        vertices = entity.vertices() if callable(getattr(entity, "vertices", None)) else getattr(entity, "vertices", [])
-        points = tuple(
-            tuple(round(float(value), 6) for value in (vertex.dxf.location.x, vertex.dxf.location.y))
-            for vertex in vertices
-        )
+        points = _polyline_points(entity)
         if not points:
             return None
-        return (entity_type, min(points, points[::-1]), max(points, points[::-1]), bool(entity.is_closed))
+        return (entity_type, _polyline_identity(points, bool(entity.is_closed)), bool(entity.is_closed))
 
     if entity_type == "ARC":
         center = entity.dxf.center
