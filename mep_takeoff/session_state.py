@@ -32,6 +32,7 @@ ANALYSIS_STATE_KEYS = (
     "dxf_report_key",
     "dwg_report",
     "dwg_report_key",
+    "load_info",
 )
 
 REPORT_STATE_KEYS = {
