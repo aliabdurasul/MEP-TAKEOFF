@@ -14,8 +14,10 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
-from dxf_reader import get_layer_entities, layer_entity_counts, open_dxf, read_insunits, summarize_layer
+from dxf_reader import get_layer_entities, layer_entity_counts, load_dxf, open_dxf, read_insunits, summarize_layer
 from excel_export import build_takeoff_excel
+from ezdxf import path as ezdxf_path
+from ezdxf.math import Vec3
 from geometry import (
     MeasurementRow,
     approximate_entity_segments,
@@ -23,14 +25,21 @@ from geometry import (
     deduplicate_entities,
     entity_geometry_signature,
     measure_entity,
+    measure_entity_3d,
 )
 from ezdwg_reader import EZDWG_AVAILABLE, get_entities as get_dwg_entities
 from ezdwg_reader import get_layers as get_dwg_layers
 from ezdwg_reader import open_dwg, read_insunits as read_dwg_insunits
 from mep_takeoff.diagnostics import (
     LENGTH_UNIT_METRES,
+    collinear_overlaps,
     external_references,
+    identical_arcs_across_layers,
+    insert_instance_count,
     length_unit,
+    pipe_geometry_in_blocks,
+    pipe_layer_findings,
+    polyline_is_closed,
     takeoff_warnings,
     unsupported_pipe_entities,
     xref_dependent_layer_count,
@@ -64,6 +73,11 @@ UNIT_LABELS = {
 
 PIPE_ENTITY_TYPES = {"LINE", "LWPOLYLINE", "POLYLINE", "POLYLINE_2D", "POLYLINE_3D", "ARC"}
 DIAMETER_LABEL_RE = re.compile(r"(?i)(?:DN|Ø|ø)\s*([0-9]+(?:[.,][0-9]+)?)")
+DXF_DIAMETER_LABEL_RE = re.compile(r"(?i)(DN|ДУ|Ø|⌀)\s*([0-9]+(?:[.,][0-9]+)?)")
+DXF_SPECIAL_CODES = (("%%%", "%"), ("%%c", "Ø"), ("%%C", "Ø"), ("%%d", "°"), ("%%D", "°"), ("%%p", "±"), ("%%P", "±"))
+DIAMETER_TYPE_OUTSIDE = "OUTSIDE_DIAMETER"
+DIAMETER_TYPE_NOMINAL = "NOMINAL_DN"
+DIAMETER_TYPE_UNKNOWN = "UNKNOWN"
 DXF_UNICODE_ESCAPE_RE = re.compile(r"\\U\+([0-9A-Fa-f]{4})")
 DIAMETER_MARKER_CELL_SIZE = 5000.0
 MAX_REASONABLE_LENGTH = 1_000_000_000.0
@@ -71,9 +85,16 @@ DXF_PIPE_LAYER_PREFIX = "П_Трубы"
 DXF_PIPE_LAYER_EXCLUDES = {"П_Трубы_ Осевая линия"}
 DXF_DIAMETER_LAYER = "П_Марки труб"
 DXF_EQUIPMENT_LAYERS = {"Оборудование", "Марки оборудования"}
+DXF_EQUIPMENT_TAG_LAYER = "Марки оборудования"
 DXF_FITTING_LAYERS = {"Соединительные детали трубопроводов"}
 DXF_VALVE_LAYERS = {"Арматура трубопроводов"}
 DXF_MARKER_CELL_SIZE = 5000.0
+DXF_MARKER_BASE_THRESHOLD = 3000.0
+DXF_MARKER_BASE_THRESHOLD_M = 3.0
+DXF_MARKER_CELL_SIZE_M = 5.0
+LENGTH_BASIS_PLAN = "plan (XY projection)"
+GEOMETRY_STATUS_MEASURED = "MEASURED"
+GEOMETRY_STATUS_REVIEW = "REVIEW"
 EQUIPMENT_KEYWORDS = {
     "ahu": "AHU",
     "fcu": "FCU",
@@ -611,8 +632,9 @@ def prepare_document(file_path: Path, runtime_dirs: dict[str, Path]) -> tuple[Pa
         st.session_state["converted_path"] = None
         return file_path, dwg_doc, insunits
     else:
-        doc = open_dxf(file_path)
+        doc, load_info = load_dxf(file_path)
         insunits = read_insunits(doc)
+        st.session_state["load_info"] = load_info
         st.session_state["drawing_kind"] = "dxf"
         st.session_state["drawing_doc"] = doc
         st.session_state["dxf_doc"] = doc
@@ -626,6 +648,10 @@ def prepare_document(file_path: Path, runtime_dirs: dict[str, Path]) -> tuple[Pa
 
 def build_layer_table(doc) -> list[dict]:
     return layer_entity_counts(doc)
+
+
+def _error_detail(error: Exception) -> str:
+    return f"{type(error).__name__}: {error}"[:300]
 
 
 def calculate_layer(
@@ -774,6 +800,40 @@ def _is_measured_entity(entity) -> bool:
     return measurable and not ignored
 
 
+def _has_z_variation(entity) -> bool:
+    kind = entity.dxftype()
+    if kind == "LINE":
+        return abs(float(entity.dxf.end.z) - float(entity.dxf.start.z)) > 1e-9
+    if kind == "POLYLINE" and getattr(entity, "is_3d_polyline", False):
+        heights = [float(vertex.dxf.location.z) for vertex in entity.vertices]
+        return bool(heights) and max(heights) - min(heights) > 1e-9
+    return False
+
+
+def _is_full_circle_arc(entity) -> bool:
+    if entity.dxftype() != "ARC":
+        return False
+    sweep = (float(entity.dxf.end_angle) - float(entity.dxf.start_angle)) % 360.0
+    return math.isclose(sweep, 0.0, abs_tol=1e-9) or math.isclose(sweep, 360.0, abs_tol=1e-9)
+
+
+def _geometry_flags(entity, z_variation: bool, handle: str, same_layer_handles, across_layer_handles) -> list[str]:
+    """Reasons a measured pipe entity needs engineering review; its length stays counted."""
+
+    flags = []
+    if z_variation:
+        flags.append("Z_VARIATION")
+    if entity.dxftype() in {"LWPOLYLINE", "POLYLINE"} and polyline_is_closed(entity):
+        flags.append("CLOSED_POLYLINE")
+    if _is_full_circle_arc(entity):
+        flags.append("FULL_CIRCLE_ARC")
+    if handle in same_layer_handles:
+        flags.append("OVERLAP_SAME_LAYER")
+    if handle in across_layer_handles:
+        flags.append("OVERLAP_ACROSS_LAYERS")
+    return flags
+
+
 def _validate_pipe_invariants(total_pipe_length: float, pipe_rows: list[dict], pipe_detail_rows: list[dict], pipe_entity_count: int) -> None:
     if pipe_rows:
         diameter_total = sum(float(row.get("Length (m)") or 0.0) for row in pipe_rows)
@@ -816,6 +876,9 @@ def _dxf_text_value(entity) -> str:
 
 
 def _decode_dxf_text(text: str) -> str:
+    if "%%" in text:
+        for code, replacement in DXF_SPECIAL_CODES:
+            text = text.replace(code, replacement)
     if "\\U+" not in text:
         return text
 
@@ -841,6 +904,28 @@ def _dxf_point_2d(value) -> tuple[float, float] | None:
     return (x, y)
 
 
+def _has_default_extrusion(entity) -> bool:
+    try:
+        return Vec3(entity.dxf.get("extrusion", (0, 0, 1))).isclose(Vec3(0, 0, 1))
+    except Exception:
+        return True
+
+
+def _to_wcs(entity, points: list) -> list:
+    """OCS points of planar entities in world coordinates (unchanged for the default +Z extrusion)."""
+
+    if _has_default_extrusion(entity):
+        return points
+    ocs = entity.ocs()
+    elevation = float(entity.dxf.get("elevation", 0.0) or 0.0) if entity.dxftype() == "LWPOLYLINE" else 0.0
+    converted = []
+    for point in points:
+        z = float(point[2]) if len(point) > 2 else elevation
+        world = ocs.to_wcs(Vec3(float(point[0]), float(point[1]), z))
+        converted.append((world.x, world.y))
+    return converted
+
+
 def _dxf_reference_point(entity) -> tuple[float, float] | None:
     kind = entity.dxftype()
     if kind == "LINE":
@@ -849,16 +934,17 @@ def _dxf_reference_point(entity) -> tuple[float, float] | None:
         if start and end:
             point = ((start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0)
             return point if all(math.isfinite(value) for value in point) else None
-    elif kind == "ARC":
-        center = _dxf_point_2d(getattr(entity.dxf, "center", None))
-        return center
-    elif kind == "CIRCLE":
-        center = _dxf_point_2d(getattr(entity.dxf, "center", None))
-        return center
+    elif kind in {"ARC", "CIRCLE"}:
+        center = getattr(entity.dxf, "center", None)
+        if center is None:
+            return None
+        with contextlib.suppress(Exception):
+            center = _to_wcs(entity, [tuple(center)])[0]
+        return _dxf_point_2d(center)
     elif kind == "LWPOLYLINE":
         points = []
         with contextlib.suppress(Exception):
-            points = [tuple(point[:2]) for point in entity.get_points("xy")]
+            points = _to_wcs(entity, [tuple(point[:2]) for point in entity.get_points("xy")])
         coords = [(_dxf_point_2d(point) or (None, None)) for point in points]
         filtered = [(x, y) for x, y in coords if x is not None and y is not None]
         if filtered:
@@ -875,6 +961,9 @@ def _dxf_reference_point(entity) -> tuple[float, float] | None:
         elif vertices is not None:
             with contextlib.suppress(Exception):
                 points = [vertex.dxf.location for vertex in vertices]
+        if not getattr(entity, "is_3d_polyline", False):
+            with contextlib.suppress(Exception):
+                points = _to_wcs(entity, [tuple(point) for point in points])
         filtered = [point for point in (_dxf_point_2d(point) for point in points) if point is not None]
         if filtered:
             xs = [point[0] for point in filtered]
@@ -885,11 +974,13 @@ def _dxf_reference_point(entity) -> tuple[float, float] | None:
 
 
 def _normalize_dxf_diameter_label(text: str) -> str | None:
+    """'Ø<n>' for outside-diameter notation (Ø, ø, ⌀, %%c), 'DN<n>' for nominal size (DN, Ду); no conversion."""
+
     cleaned = _decode_dxf_text(text).replace(" ", "")
-    match = DIAMETER_LABEL_RE.search(cleaned)
+    match = DXF_DIAMETER_LABEL_RE.search(cleaned)
     if not match:
         return None
-    value = match.group(1).replace(",", ".")
+    value = match.group(2).replace(",", ".")
     try:
         parsed = float(value)
     except Exception:
@@ -898,20 +989,41 @@ def _normalize_dxf_diameter_label(text: str) -> str | None:
         diameter_text = str(int(parsed))
     else:
         diameter_text = value
-    return f"DN{diameter_text}"
+    prefix = "DN" if match.group(1).upper() in {"DN", "ДУ"} else "Ø"
+    return f"{prefix}{diameter_text}"
 
 
-def _marker_cell(point: tuple[float, float]) -> tuple[int, int]:
+def _diameter_type(label: str) -> str:
+    if label.startswith("Ø"):
+        return DIAMETER_TYPE_OUTSIDE
+    if label.startswith("DN"):
+        return DIAMETER_TYPE_NOMINAL
+    return DIAMETER_TYPE_UNKNOWN
+
+
+def _marker_settings(meters_per_unit: float | None, max_text_height: float = 0.0) -> tuple[float, float]:
+    """Marker search distance and grid cell in drawing units (3 m and 5 m when units are known)."""
+
+    if meters_per_unit:
+        base_threshold = round(DXF_MARKER_BASE_THRESHOLD_M / meters_per_unit, 9)
+        cell_size = round(DXF_MARKER_CELL_SIZE_M / meters_per_unit, 9)
+    else:
+        base_threshold = DXF_MARKER_BASE_THRESHOLD
+        cell_size = DXF_MARKER_CELL_SIZE
+    return base_threshold, max(cell_size, base_threshold, max_text_height * 8.0)
+
+
+def _marker_cell(point: tuple[float, float], cell_size: float = DXF_MARKER_CELL_SIZE) -> tuple[int, int]:
     if not all(math.isfinite(value) for value in point):
         raise ValueError("non-finite point")
     return (
-        int(math.floor(point[0] / DXF_MARKER_CELL_SIZE)),
-        int(math.floor(point[1] / DXF_MARKER_CELL_SIZE)),
+        int(math.floor(point[0] / cell_size)),
+        int(math.floor(point[1] / cell_size)),
     )
 
 
-def _collect_dxf_diameter_markers(entities: list) -> dict[tuple[int, int], list[dict]]:
-    markers_by_cell: dict[tuple[int, int], list[dict]] = defaultdict(list)
+def _dxf_diameter_markers(entities: list) -> list[dict]:
+    markers = []
     for entity in entities:
         if entity.dxftype() not in {"TEXT", "MTEXT"}:
             continue
@@ -929,9 +1041,19 @@ def _collect_dxf_diameter_markers(entities: list) -> dict[tuple[int, int], list[
             height = float(height_value)
         except Exception:
             height = 0.0
-        marker = {"label": label, "point": insert, "height": height}
-        markers_by_cell[_marker_cell(insert)].append(marker)
+        markers.append({"label": label, "point": insert, "height": height})
+    return markers
+
+
+def _bucket_markers(markers: list[dict], cell_size: float) -> dict[tuple[int, int], list[dict]]:
+    markers_by_cell: dict[tuple[int, int], list[dict]] = defaultdict(list)
+    for marker in markers:
+        markers_by_cell[_marker_cell(marker["point"], cell_size)].append(marker)
     return markers_by_cell
+
+
+def _collect_dxf_diameter_markers(entities: list, cell_size: float = DXF_MARKER_CELL_SIZE) -> dict[tuple[int, int], list[dict]]:
+    return _bucket_markers(_dxf_diameter_markers(entities), cell_size)
 
 
 def _axis_category_from_points(start: tuple[float, float], end: tuple[float, float]) -> str:
@@ -987,10 +1109,14 @@ def _infer_pipe_category(entity) -> str:
     return "UNKNOWN"
 
 
-def _candidate_markers_for_point(point: tuple[float, float], markers_by_cell: dict[tuple[int, int], list[dict]]) -> list[dict]:
+def _candidate_markers_for_point(
+    point: tuple[float, float],
+    markers_by_cell: dict[tuple[int, int], list[dict]],
+    cell_size: float = DXF_MARKER_CELL_SIZE,
+) -> list[dict]:
     if not all(math.isfinite(value) for value in point):
         return []
-    cell_x, cell_y = _marker_cell(point)
+    cell_x, cell_y = _marker_cell(point, cell_size)
     candidates: list[dict] = []
     for offset_x in (-1, 0, 1):
         for offset_y in (-1, 0, 1):
@@ -998,25 +1124,68 @@ def _candidate_markers_for_point(point: tuple[float, float], markers_by_cell: di
     return candidates
 
 
-def _best_dxf_diameter_label(entity, markers_by_cell: dict[tuple[int, int], list[dict]]) -> str:
+def _best_dxf_diameter_label(
+    entity,
+    markers_by_cell: dict[tuple[int, int], list[dict]],
+    base_threshold: float = DXF_MARKER_BASE_THRESHOLD,
+    cell_size: float = DXF_MARKER_CELL_SIZE,
+) -> str:
     reference = _dxf_reference_point(entity)
     if reference is None:
         return "UNKNOWN"
     best_label = "UNKNOWN"
     best_distance = float("inf")
-    for marker in _candidate_markers_for_point(reference, markers_by_cell):
+    for marker in _candidate_markers_for_point(reference, markers_by_cell, cell_size):
         marker_point = marker.get("point")
         if marker_point is None:
             continue
         distance = math.hypot(reference[0] - marker_point[0], reference[1] - marker_point[1])
-        threshold = max(3000.0, float(marker.get("height") or 0.0) * 8.0)
+        threshold = max(base_threshold, float(marker.get("height") or 0.0) * 8.0)
         if distance < best_distance and distance <= threshold:
             best_distance = distance
             best_label = marker["label"]
     return best_label
 
 
-def _dxf_diameter_evidence(entity, markers_by_cell: dict[tuple[int, int], list[dict]]) -> dict:
+def _wcs_outline(entity, sagitta: float) -> list[tuple[float, float]]:
+    try:
+        return [(float(vertex.x), float(vertex.y)) for vertex in ezdxf_path.make_path(entity).flattening(sagitta)]
+    except Exception:
+        return []
+
+
+def _distance_to_outline(point: tuple[float, float], outline: list[tuple[float, float]]) -> float:
+    if not outline:
+        return math.inf
+    if len(outline) == 1:
+        return math.hypot(point[0] - outline[0][0], point[1] - outline[0][1])
+    best = math.inf
+    for start, end in zip(outline, outline[1:]):
+        dx, dy = end[0] - start[0], end[1] - start[1]
+        length_sq = dx * dx + dy * dy
+        t = 0.0 if length_sq == 0.0 else max(0.0, min(1.0, ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / length_sq))
+        best = min(best, math.hypot(point[0] - (start[0] + t * dx), point[1] - (start[1] + t * dy)))
+    return best
+
+
+def _diameter_candidates(entity, markers: list[dict], base_threshold: float) -> list[str]:
+    """Labels of markers within the search distance of the pipe geometry itself (not assigned)."""
+
+    outline = _wcs_outline(entity, max(base_threshold / 1000.0, 1e-6))
+    labels = {
+        marker["label"]
+        for marker in markers
+        if _distance_to_outline(marker["point"], outline) <= max(base_threshold, float(marker.get("height") or 0.0) * 8.0)
+    }
+    return sorted(labels)
+
+
+def _dxf_diameter_evidence(
+    entity,
+    markers_by_cell: dict[tuple[int, int], list[dict]],
+    base_threshold: float = DXF_MARKER_BASE_THRESHOLD,
+    cell_size: float = DXF_MARKER_CELL_SIZE,
+) -> dict:
     reference = _dxf_reference_point(entity)
     if reference is None:
         return {
@@ -1028,12 +1197,12 @@ def _dxf_diameter_evidence(entity, markers_by_cell: dict[tuple[int, int], list[d
         }
 
     nearest = None
-    for marker in _candidate_markers_for_point(reference, markers_by_cell):
+    for marker in _candidate_markers_for_point(reference, markers_by_cell, cell_size):
         marker_point = marker.get("point")
         if marker_point is None:
             continue
         distance = math.hypot(reference[0] - marker_point[0], reference[1] - marker_point[1])
-        threshold = max(3000.0, float(marker.get("height") or 0.0) * 8.0)
+        threshold = max(base_threshold, float(marker.get("height") or 0.0) * 8.0)
         candidate = (distance, marker, threshold)
         if nearest is None or distance < nearest[0]:
             nearest = candidate
@@ -1127,9 +1296,14 @@ def calculate_dxf_quantities(
     display_unit_label: str,
     meters_per_unit: float | None,
     remove_duplicate_geometry: bool = True,
+    load_info: dict | None = None,
 ) -> dict:
     entities = list(doc.modelspace())
-    markers_by_cell = _collect_dxf_diameter_markers(entities)
+    diameter_markers = _dxf_diameter_markers(entities)
+    marker_threshold, marker_cell_size = _marker_settings(
+        meters_per_unit, max((marker["height"] for marker in diameter_markers), default=0.0)
+    )
+    markers_by_cell = _bucket_markers(diameter_markers, marker_cell_size)
 
     raw_entity_count = len(entities)
     raw_prefixed_pipe_geometry_entities = [
@@ -1192,12 +1366,14 @@ def calculate_dxf_quantities(
         pipe_entities_by_layer[layer_name].append(entity)
 
     unique_pipe_entities: list = []
+    unique_by_layer: dict[str, list] = {}
     for layer_name, layer_entities in pipe_entities_by_layer.items():
         if remove_duplicate_geometry:
             unique_entities, duplicate_entities = deduplicate_entities(layer_entities)
         else:
             unique_entities, duplicate_entities = layer_entities, []
         unique_pipe_entities.extend(unique_entities)
+        unique_by_layer[layer_name] = unique_entities
         layer_duplicate_count[layer_name] = len(duplicate_entities)
         layer_duplicate_raw_length[layer_name] = sum(
             convert_length(measure_entity(entity)[0], meters_per_unit)
@@ -1206,7 +1382,13 @@ def calculate_dxf_quantities(
         )
 
     unique_pipe_handles = {_entity_handle(entity) for entity in unique_pipe_entities}
+    overlaps = collinear_overlaps(unique_by_layer)
+    arc_copies, arc_copy_length_du, arc_copy_handles = identical_arcs_across_layers(unique_by_layer, lambda entity: measure_entity(entity)[0])
+    across_layer_handles = overlaps.across_layers_handles | arc_copy_handles
 
+    pipe_lengths_3d: list[float] = []
+    review_lengths: dict[str, list] = defaultdict(lambda: [0, 0.0])
+    candidate_count, candidate_length = 0, 0.0
     for entity in unique_pipe_entities:
         handle = _entity_handle(entity)
         layer_name = _dxf_layer_name(entity)
@@ -1216,17 +1398,29 @@ def calculate_dxf_quantities(
         converted_length = convert_length(raw_length, meters_per_unit)
         if not math.isfinite(converted_length) or converted_length < 0:
             continue
-        diameter = _best_dxf_diameter_label(entity, markers_by_cell)
-        diameter_evidence = _dxf_diameter_evidence(entity, markers_by_cell)
+        diameter = _best_dxf_diameter_label(entity, markers_by_cell, marker_threshold, marker_cell_size)
+        diameter_evidence = _dxf_diameter_evidence(entity, markers_by_cell, marker_threshold, marker_cell_size)
         diameter_source = "TEXT/MTEXT marker on DXF layer"
         status = "CONFIRMED"
         reason = "Диаметр подтверждён по маркерам DXF"
+        candidates: list[str] = []
         if diameter == "UNKNOWN":
             diameter_source = "UNKNOWN"
             status = "UNKNOWN"
             reason = "NO_DIAMETER_FOUND"
+            candidates = _diameter_candidates(entity, diameter_markers, marker_threshold)
+            if candidates:
+                candidate_count += 1
+                candidate_length += converted_length
         category = _infer_pipe_category(entity)
         entity_type = entity.dxftype()
+        z_variation = _has_z_variation(entity)
+        length_3d = convert_length(measure_entity_3d(entity), meters_per_unit) if z_variation else converted_length
+        flags = _geometry_flags(entity, z_variation, handle, overlaps.same_layer_handles, across_layer_handles)
+        for flag in flags:
+            review_lengths[flag][0] += 1
+            review_lengths[flag][1] += length_3d - converted_length if flag == "Z_VARIATION" else converted_length
+        pipe_lengths_3d.append(length_3d)
         pipe_entity_count += 1
         pipes_by_diameter[diameter] += converted_length
         layer_measured_length[layer_name] += converted_length
@@ -1239,8 +1433,11 @@ def calculate_dxf_quantities(
                 "Entity Type": entity_type,
                 "Raw Length": round(float(raw_length), 6),
                 "Length (m)": round(float(converted_length), 6),
+                "Length 3D (m)": round(float(length_3d), 6),
                 "Diameter": diameter,
+                "Diameter Type": _diameter_type(diameter),
                 "Diameter Source": diameter_source,
+                "Diameter Candidates": ", ".join(candidates),
                 "Reference Point": diameter_evidence["reference"],
                 "Nearest Marker Label": diameter_evidence["marker_label"],
                 "Nearest Marker Distance": diameter_evidence["marker_distance"],
@@ -1248,29 +1445,44 @@ def calculate_dxf_quantities(
                 "Diameter Evidence": diameter_evidence["reason"],
                 "Status": status,
                 "Reason": reason,
+                "Geometry Flags": ";".join(flags),
+                "Geometry Status": GEOMETRY_STATUS_REVIEW if flags else GEOMETRY_STATUS_MEASURED,
             }
         )
 
     equipment_counts = Counter()
     fitting_counts = Counter()
     valve_counts = Counter()
+    xref_rows = external_references(doc)
+    xref_names = {row["Name"] for row in xref_rows}
+    unrecognized: Counter = Counter()
+    tag_layer_inserts = 0
+    anonymous_inserts = 0
 
     for entity in entities:
         if entity.dxftype() != "INSERT":
             continue
+        instances = insert_instance_count(entity)
+        block_name = str(getattr(entity.dxf, "name", "") or "")
         classification = _classify_dxf_insert(entity)
         if classification is None:
+            if block_name not in xref_names:
+                unrecognized[(_dxf_layer_name(entity), block_name)] += instances
             continue
+        if _dxf_layer_name(entity) == DXF_EQUIPMENT_TAG_LAYER:
+            tag_layer_inserts += instances
+        if block_name.startswith("*"):
+            anonymous_inserts += instances
         category, label = classification
         if category == "EQUIPMENT":
-            equipment_counts[label] += 1
+            equipment_counts[label] += instances
         elif category == "FITTING":
-            fitting_counts[label] += 1
+            fitting_counts[label] += instances
         elif category == "VALVE":
-            valve_counts[label] += 1
+            valve_counts[label] += instances
 
     pipe_rows = [
-        {"Diameter": diameter, "Length (m)": round(total, 6)}
+        {"Diameter": diameter, "Diameter Type": _diameter_type(diameter), "Length (m)": round(total, 6)}
         for diameter, total in sorted(pipes_by_diameter.items(), key=lambda item: item[0])
     ]
 
@@ -1292,6 +1504,7 @@ def calculate_dxf_quantities(
         pipe_by_diameter_rows.append(
             {
                 "Diameter": row["Diameter"],
+                "Diameter Type": row["Diameter Type"],
                 "Length (m)": round(length_value, 6),
                 "Percentage": round(percentage, 2),
             }
@@ -1355,6 +1568,7 @@ def calculate_dxf_quantities(
             "Nearest Marker Distance": row["Nearest Marker Distance"],
             "Marker Threshold": row["Marker Threshold"],
             "Diameter Evidence": row["Diameter Evidence"],
+            "Diameter Candidates": row["Diameter Candidates"],
             "Reason": row["Reason"],
             "Status": row["Status"],
         }
@@ -1387,8 +1601,8 @@ def calculate_dxf_quantities(
         "unknown_category_length": summary_by_category["UNKNOWN"],
         "notes": [
             "Only DXF entities on pipe layers with measurable LINE/LWPOLYLINE/POLYLINE/ARC geometry are treated as candidate pipe runs.",
-            "Closed polylines and non-pipe auxiliary geometry remain excluded unless explicitly supported by the real DXF evidence.",
-            "Duplicate detection is logged conservatively and does not guess a diameter.",
+            "Closed polylines, full-circle arcs and overlapping geometry on pipe layers are counted and flagged for review (Geometry Flags).",
+            "Duplicate detection removes exact same-layer duplicates only (vertices and bulges) and does not guess a diameter.",
         ],
     }
 
@@ -1398,7 +1612,36 @@ def calculate_dxf_quantities(
         layer_of=_dxf_layer_name,
         is_measured=_is_measured_entity,
     )
-    xref_rows = external_references(doc)
+
+    blocks = pipe_geometry_in_blocks(doc, is_pipe_layer=_is_dxf_pipe_layer, layer_of=_dxf_layer_name, measure=measure_entity)
+    block_rows = [
+        {
+            "Block": row["Block"],
+            "Inserts": row["Inserts"],
+            "Pipe Entities": row["Pipe Entities"],
+            "Length (m)": round(convert_length(row["Length (du)"], meters_per_unit), 6),
+        }
+        for row in blocks["rows"]
+    ]
+    layer_findings = [
+        {
+            "Layer": row["Layer"],
+            "Issue": row["Issue"],
+            "Kind": row["Kind"],
+            "Included": row["Included"],
+            "Entities": row["Entities"],
+            "Length (m)": round(convert_length(row["Length (du)"], meters_per_unit), 6),
+        }
+        for row in pipe_layer_findings(
+            doc, entities, is_pipe_layer=_is_dxf_pipe_layer, layer_of=_dxf_layer_name, measure=measure_entity, prefix=DXF_PIPE_LAYER_PREFIX
+        )
+    ]
+    unrecognized_rows = [
+        {"Layer": layer, "Block": block, "Count": count, "MEP Layer": _is_mep_symbol_layer(layer)}
+        for (layer, block), count in sorted(unrecognized.items())
+    ]
+    across_layer_length = convert_length(overlaps.across_layers_length + arc_copy_length_du, meters_per_unit)
+    total_pipe_length_3d = math.fsum(pipe_lengths_3d)
     warnings = takeoff_warnings(
         meters_per_unit=meters_per_unit,
         pipe_entity_count=pipe_entity_count,
@@ -1406,7 +1649,21 @@ def calculate_dxf_quantities(
         unsupported_rows=unsupported_rows,
         xref_rows=xref_rows,
         xref_layer_count=xref_dependent_layer_count(doc),
+        z_variation=tuple(review_lengths["Z_VARIATION"]),
+        closed_polylines=tuple(review_lengths["CLOSED_POLYLINE"]),
+        full_circle_arcs=tuple(review_lengths["FULL_CIRCLE_ARC"]),
+        overlap_same_layer=(review_lengths["OVERLAP_SAME_LAYER"][0], convert_length(overlaps.same_layer_length, meters_per_unit)),
+        overlap_across_layers=(review_lengths["OVERLAP_ACROSS_LAYERS"][0], across_layer_length),
+        diameter_candidates=(candidate_count, candidate_length),
+        diameter_types=[row["Diameter Type"] for row in pipe_rows],
+        blocks_with_pipe=(blocks["entity_count"], convert_length(blocks["length_du"], meters_per_unit)),
+        unrecognized_on_mep_layers=sum(row["Count"] for row in unrecognized_rows if row["MEP Layer"]),
+        tag_layer_inserts=tag_layer_inserts,
+        anonymous_inserts=anonymous_inserts,
+        layer_findings=layer_findings,
+        load_info=load_info,
     )
+    review_handles = {row["Handle"] for row in pipe_detail_rows if row["Geometry Flags"]}
 
     return {
         "summary": {
@@ -1429,6 +1686,16 @@ def calculate_dxf_quantities(
             "unknown_category_length": summary_by_category["UNKNOWN"],
             "length_unit": length_unit(meters_per_unit),
             "unsupported_pipe_entity_count": int(sum(row["Count"] for row in unsupported_rows)),
+            "length_basis": LENGTH_BASIS_PLAN,
+            "total_pipe_length_3d": total_pipe_length_3d,
+            "z_variation_entity_count": int(review_lengths["Z_VARIATION"][0]),
+            "ambiguous_pipe_length": math.fsum(float(row["Length (m)"]) for row in pipe_detail_rows if row["Handle"] in review_handles),
+            "unknown_diameter_length": math.fsum(float(row["Length (m)"]) for row in pipe_detail_rows if row["Diameter"] == "UNKNOWN"),
+            "diameter_candidate_length": candidate_length,
+            "pipe_geometry_in_blocks_length": convert_length(blocks["length_du"], meters_per_unit),
+            "unrecognized_insert_count": int(sum(row["Count"] for row in unrecognized_rows)),
+            "warning_count": len(warnings),
+            "load_mode": (load_info or {}).get("mode", "strict"),
         },
         "pipe_rows": pipe_rows,
         "pipe_by_diameter_rows": pipe_by_diameter_rows,
@@ -1443,7 +1710,19 @@ def calculate_dxf_quantities(
         "warnings": warnings,
         "unsupported_pipe_entities": unsupported_rows,
         "xrefs": xref_rows,
+        "unrecognized_inserts": unrecognized_rows,
+        "pipe_geometry_in_blocks": block_rows,
+        "pipe_layer_findings": layer_findings,
     }
+
+
+def _is_mep_symbol_layer(layer_name: str) -> bool:
+    return (
+        layer_name in DXF_VALVE_LAYERS
+        or layer_name in DXF_FITTING_LAYERS
+        or layer_name in DXF_EQUIPMENT_LAYERS
+        or layer_name.startswith(DXF_PIPE_LAYER_PREFIX)
+    )
 
 
 def plot_selected_layer(entities) -> None:
@@ -1474,24 +1753,34 @@ def plot_selected_layer(entities) -> None:
 
 
 def build_dxf_takeoff_excel(*, file_name: str, report: dict, layer_calculation: dict, selected_layer: str, display_unit: str) -> bytes:
-    length_unit_known = report["summary"].get("length_unit", LENGTH_UNIT_METRES) == LENGTH_UNIT_METRES
+    summary = report["summary"]
+    length_unit_known = summary.get("length_unit", LENGTH_UNIT_METRES) == LENGTH_UNIT_METRES
     total_column = "Total Pipe Length (m)" if length_unit_known else "Total Pipe Length (drawing units)"
     return build_takeoff_excel(
         file_name=file_name,
         summary_rows=[
             {
-                total_column: round(report["summary"]["total_pipe_length"], 6),
-                "Pipe Entities": report["summary"]["pipe_entity_count"],
-                "Equipment Count": report["summary"]["equipment_count"],
-                "Fittings Count": report["summary"]["fittings_count"],
-                "Valves Count": report["summary"]["valves_count"],
+                total_column: round(summary["total_pipe_length"], 6),
+                "Pipe Entities": summary["pipe_entity_count"],
+                "Equipment Count": summary["equipment_count"],
+                "Fittings Count": summary["fittings_count"],
+                "Valves Count": summary["valves_count"],
                 "Unit": display_unit,
                 "Duplicates Removed": sum(report["debug"].get("duplicate_entities_by_layer", {}).values()),
-                "Duplicate Length": round(report["summary"].get("duplicate_raw_length", 0.0), 6),
-                "Raw Length": round(report["summary"].get("raw_prefixed_pipe_length", 0.0), 6),
-                "Excluded Entities": report["summary"].get("excluded_pipe_geometry_count", 0),
-                "Excluded Length": round(report["summary"].get("excluded_pipe_geometry_length", 0.0), 6),
-                "Final Length": round(report["summary"]["total_pipe_length"], 6),
+                "Duplicate Length": round(summary.get("duplicate_raw_length", 0.0), 6),
+                "Raw Length": round(summary.get("raw_prefixed_pipe_length", 0.0), 6),
+                "Excluded Entities": summary.get("excluded_pipe_geometry_count", 0),
+                "Excluded Length": round(summary.get("excluded_pipe_geometry_length", 0.0), 6),
+                "Final Length": round(summary["total_pipe_length"], 6),
+                "Length Basis": summary.get("length_basis", LENGTH_BASIS_PLAN),
+                "Total Pipe Length 3D": round(summary.get("total_pipe_length_3d", summary["total_pipe_length"]), 6),
+                "Unknown Diameter Length": round(summary.get("unknown_diameter_length", 0.0), 6),
+                "Review Geometry Length": round(summary.get("ambiguous_pipe_length", 0.0), 6),
+                "Pipe Geometry In Blocks (not measured)": round(summary.get("pipe_geometry_in_blocks_length", 0.0), 6),
+                "Unmeasured Pipe-Layer Entities": summary.get("unsupported_pipe_entity_count", 0),
+                "Unrecognized Blocks": summary.get("unrecognized_insert_count", 0),
+                "Warnings": summary.get("warning_count", len(report.get("warnings", []))),
+                "Load Mode": summary.get("load_mode", "strict"),
             }
         ],
         pipe_by_diameter_rows=report["pipe_by_diameter_rows"],
@@ -1510,23 +1799,30 @@ def build_dxf_takeoff_excel(*, file_name: str, report: dict, layer_calculation: 
         unknown_review_rows=report.get("unknown_review_rows", []),
         warning_rows=report.get("warnings", []),
         unsupported_rows=report.get("unsupported_pipe_entities", []),
+        unrecognized_rows=report.get("unrecognized_inserts", []),
+        block_rows=report.get("pipe_geometry_in_blocks", []),
         length_unit_known=length_unit_known,
     )
 
 
-def render_takeoff_warnings(report: dict) -> None:
+def render_takeoff_warnings(report: dict, length_header: str) -> None:
     warnings = report.get("warnings") or []
-    if not warnings:
+    tables = [
+        ("Не измерено на трубных слоях", report.get("unsupported_pipe_entities") or [], {}),
+        ("Внешние ссылки (XREF)", report.get("xrefs") or [], {}),
+        ("Трубная геометрия в блоках (не включена в метраж)", report.get("pipe_geometry_in_blocks") or [], {"Length (m)": length_header}),
+        ("Нераспознанные блоки", report.get("unrecognized_inserts") or [], {}),
+        ("Трубные слои для проверки", report.get("pipe_layer_findings") or [], {"Length (m)": length_header}),
+    ]
+    if not warnings and not any(rows for _title, rows, _rename in tables):
         return
     st.markdown("### Предупреждения")
     for warning in warnings:
         st.warning(f"{warning['Code']}: {warning['Message']}")
-    unsupported_rows = report.get("unsupported_pipe_entities") or []
-    if unsupported_rows:
-        st.dataframe(pd.DataFrame(unsupported_rows), use_container_width=True, hide_index=True)
-    xref_rows = report.get("xrefs") or []
-    if xref_rows:
-        st.dataframe(pd.DataFrame(xref_rows), use_container_width=True, hide_index=True)
+    for title, rows, rename in tables:
+        if rows:
+            st.caption(title)
+            st.dataframe(pd.DataFrame(rows).rename(columns=rename), use_container_width=True, hide_index=True)
 
 
 def main() -> None:
@@ -1588,12 +1884,12 @@ def main() -> None:
                 st.success("DWG загружен локально через ezdwg.")
             else:
                 st.success("DXF успешно загружен.")
-        except Exception:
+        except Exception as error:
             reset_analysis()
             if source_path.suffix.lower() == ".dwg":
-                st.error("DWG не удалось прочитать локально.")
+                st.error(f"DWG не удалось прочитать локально: {_error_detail(error)}")
             else:
-                st.error("Не удалось обработать DXF-файл.")
+                st.error(f"Не удалось обработать DXF-файл: {_error_detail(error)}")
             return
 
     drawing_kind = st.session_state.get("drawing_kind")
@@ -1728,34 +2024,41 @@ def main() -> None:
                     unit_label,
                     meters_per_unit,
                     st.session_state.get("remove_duplicate_geometry", True),
+                    load_info=st.session_state.get("load_info"),
                 )
                 st.session_state["dxf_report_key"] = report_key
-            except Exception:
+            except Exception as error:
                 invalidate_report(st.session_state, "dxf_report")
-                st.error("Не удалось рассчитать MEP-метраж для DXF.")
+                st.error(f"Не удалось рассчитать MEP-метраж для DXF: {_error_detail(error)}")
                 return
 
         report = st.session_state["dxf_report"]
+        summary = report["summary"]
         display_unit = "m" if meters_per_unit is not None else unit_label
+        length_header = "Length (m)" if meters_per_unit is not None else "Length (drawing units)"
+        length_3d_header = "Length 3D (m)" if meters_per_unit is not None else "Length 3D (drawing units)"
 
         st.markdown("### Общий результат")
-        st.metric("Общая длина труб", f"{report['summary']['total_pipe_length']:,.2f} {display_unit}")
-        st.write(f"Количество труб: {report['summary']['pipe_entity_count']}")
-        st.write(f"Оборудование: {report['summary']['equipment_count']}")
-        st.write(f"Фитинги: {report['summary']['fittings_count']}")
-        st.write(f"Клапаны: {report['summary']['valves_count']}")
+        st.metric("Общая длина труб", f"{summary['total_pipe_length']:,.2f} {display_unit}")
+        st.write(f"База длины: проекция на план (XY). 3D-длина: {summary.get('total_pipe_length_3d', summary['total_pipe_length']):,.2f} {display_unit}")
+        st.write(f"Без диаметра (UNKNOWN): {summary.get('unknown_diameter_length', 0.0):,.2f} {display_unit}")
+        st.write(f"Геометрия для проверки (флаги): {summary.get('ambiguous_pipe_length', 0.0):,.2f} {display_unit}")
+        st.write(f"Неизмеренные объекты на трубных слоях: {summary.get('unsupported_pipe_entity_count', 0)}")
+        st.write(f"Количество труб: {summary['pipe_entity_count']}")
+        st.write(f"Оборудование: {summary['equipment_count']}")
+        st.write(f"Фитинги: {summary['fittings_count']}")
+        st.write(f"Клапаны: {summary['valves_count']}")
 
-        render_takeoff_warnings(report)
-        length_header = "Length (m)" if meters_per_unit is not None else "Length (drawing units)"
+        render_takeoff_warnings(report, length_header)
 
         st.markdown("### Метод расчёта")
-        st.write("Общая длина труб: сумма измеряемой DXF-геометрии трубных объектов.")
+        st.write("Общая длина труб: сумма измеряемой DXF-геометрии трубных объектов, по проекции на план (XY).")
         if meters_per_unit is None:
             st.write("Единицы: не определены — длины показаны в единицах чертежа, перевод в метры не выполнен.")
         else:
             st.write(f"Единицы: {unit_label} → метры (1 единица чертежа = {meters_per_unit:g} м).")
-        st.write("Диаметр: определяется по доступным маркерам DXF и детерминированной связи с геометрией.")
-        st.write("Неопределённые значения: не угадываются и помещаются в UNKNOWN.")
+        st.write("Диаметр: по маркерам DXF у опорной точки трубы. Ø — наружный диаметр, DN — условный проход; пересчёт Ø↔DN не выполняется.")
+        st.write("Неопределённые значения: не угадываются и помещаются в UNKNOWN; маркеры рядом с трубой показаны как кандидаты.")
 
         st.markdown("### Трубы по диаметрам")
         pipes_df = pd.DataFrame(report["pipe_by_diameter_rows"])
@@ -1763,7 +2066,7 @@ def main() -> None:
             st.info("Не обнаружено")
         else:
             st.dataframe(
-                pipes_df[["Diameter", "Length (m)"]].rename(columns={"Length (m)": length_header}),
+                pipes_df[["Diameter", "Diameter Type", "Length (m)"]].rename(columns={"Length (m)": length_header}),
                 use_container_width=True,
                 hide_index=True,
             )
@@ -1775,9 +2078,23 @@ def main() -> None:
         if not pipe_detail_df.empty:
             st.markdown("### Детальная таблица труб")
             st.dataframe(
-                pipe_detail_df[["Diameter", "Length (m)", "Handle", "Layer", "Entity Type", "Diameter Source", "Status", "Reason"]].rename(
-                    columns={"Length (m)": length_header}
-                ),
+                pipe_detail_df[
+                    [
+                        "Diameter",
+                        "Diameter Type",
+                        "Length (m)",
+                        "Length 3D (m)",
+                        "Handle",
+                        "Layer",
+                        "Entity Type",
+                        "Diameter Source",
+                        "Diameter Candidates",
+                        "Status",
+                        "Geometry Status",
+                        "Geometry Flags",
+                        "Reason",
+                    ]
+                ].rename(columns={"Length (m)": length_header, "Length 3D (m)": length_3d_header}),
                 use_container_width=True,
                 hide_index=True,
             )
@@ -1788,7 +2105,9 @@ def main() -> None:
             st.write(f"Unknown objects: {len(unknown_df)}")
             st.write(f"Unknown length: {float(unknown_df['Length (m)'].sum()):.6f} {display_unit}")
             st.dataframe(
-                unknown_df[["Handle", "Layer", "Entity Type", "Length (m)", "Reason", "Status"]].rename(columns={"Length (m)": length_header}),
+                unknown_df[["Handle", "Layer", "Entity Type", "Length (m)", "Diameter Candidates", "Reason", "Status"]].rename(
+                    columns={"Length (m)": length_header}
+                ),
                 use_container_width=True,
                 hide_index=True,
             )
@@ -1810,9 +2129,9 @@ def main() -> None:
                     st.session_state.get("remove_duplicate_geometry", True),
                 )
                 st.session_state["dxf_layer_calculation_key"] = layer_report_key
-            except Exception:
+            except Exception as error:
                 invalidate_report(st.session_state, "dxf_layer_calculation")
-                st.error("Не удалось выполнить расчёт по выбранному слою.")
+                st.error(f"Не удалось выполнить расчёт по выбранному слою: {_error_detail(error)}")
                 return
 
         layer_calculation = st.session_state["dxf_layer_calculation"]
@@ -1850,21 +2169,24 @@ def main() -> None:
         st.markdown("### Предпросмотр геометрии")
         plot_selected_layer(get_layer_entities(doc, selected_layer))
 
-        excel_bytes = build_dxf_takeoff_excel(
-            file_name=uploaded_file.name,
-            report=report,
-            layer_calculation=layer_calculation,
-            selected_layer=selected_layer,
-            display_unit=display_unit,
-        )
-
-        st.download_button(
-            "Скачать Excel",
-            data=excel_bytes,
-            file_name="takeoff_result.xlsx",
-            key="download_takeoff_excel_dxf_v0",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        try:
+            excel_bytes = build_dxf_takeoff_excel(
+                file_name=uploaded_file.name,
+                report=report,
+                layer_calculation=layer_calculation,
+                selected_layer=selected_layer,
+                display_unit=display_unit,
+            )
+        except Exception as error:
+            st.error(f"Не удалось сформировать Excel-отчёт: {_error_detail(error)}. Результаты на экране не изменены.")
+        else:
+            st.download_button(
+                "Скачать Excel",
+                data=excel_bytes,
+                file_name="takeoff_result.xlsx",
+                key="download_takeoff_excel_dxf_v0",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
     else:
         st.warning("Поддерживаемый формат чертежа не распознан.")
         return

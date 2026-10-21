@@ -31,10 +31,13 @@ def build_takeoff_excel(
     details_duplicate_converted_length: float = 0.0,
     warning_rows: list[dict[str, Any]] | None = None,
     unsupported_rows: list[dict[str, Any]] | None = None,
+    unrecognized_rows: list[dict[str, Any]] | None = None,
+    block_rows: list[dict[str, Any]] | None = None,
     length_unit_known: bool = True,
 ) -> bytes:
     length_unit_ru = "м" if length_unit_known else "ед. чертежа"
     length_column = f"Длина ({length_unit_ru})"
+    length_3d_column = f"Длина 3D ({length_unit_ru})"
     measured_length_column = f"Измеренная длина ({length_unit_ru})"
     english_length_column = "Length (m)" if length_unit_known else "Length (drawing units)"
 
@@ -106,7 +109,9 @@ def build_takeoff_excel(
     if pipe_by_diameter_df.empty:
         pipe_by_diameter_df = pd.DataFrame(columns=["Диаметр", length_column, "Процент"])
     else:
-        pipe_by_diameter_df = pipe_by_diameter_df.rename(columns={"Diameter": "Диаметр", "Length": length_column, "Length (m)": length_column, "Percentage": "Процент"})
+        pipe_by_diameter_df = pipe_by_diameter_df.rename(
+            columns={"Diameter": "Диаметр", "Diameter Type": "Тип диаметра", "Length": length_column, "Length (m)": length_column, "Percentage": "Процент"}
+        )
         if "Процент" not in pipe_by_diameter_df.columns:
             pipe_by_diameter_df["Процент"] = 0.0
 
@@ -115,7 +120,18 @@ def build_takeoff_excel(
     if pipes_df.empty:
         pipes_df = pd.DataFrame(columns=["Слой", "Система", "Диаметр", "Тип объекта", length_column])
     else:
-        pipes_df = pipes_df.rename(columns={"Layer": "Слой", "System": "Система", "Diameter": "Диаметр", "Entity Type": "Тип объекта", "Length": length_column, "Length (m)": length_column})
+        pipes_df = pipes_df.rename(
+            columns={
+                "Layer": "Слой",
+                "System": "Система",
+                "Diameter": "Диаметр",
+                "Diameter Type": "Тип диаметра",
+                "Entity Type": "Тип объекта",
+                "Length": length_column,
+                "Length (m)": length_column,
+                "Length 3D (m)": length_3d_column,
+            }
+        )
         if "Тип объекта" not in pipes_df.columns:
             pipes_df["Тип объекта"] = ""
         if length_column not in pipes_df.columns:
@@ -163,10 +179,16 @@ def build_takeoff_excel(
 
     warnings_df = None
     if warning_rows is not None:
-        warnings_df = pd.DataFrame(warning_rows, columns=["Code", "Severity", "Count", "Message"])
+        warnings_df = pd.DataFrame(warning_rows, columns=["Code", "Severity", "Count", "Length", "Message"])
     unsupported_df = None
     if unsupported_rows is not None:
         unsupported_df = pd.DataFrame(unsupported_rows, columns=["Layer", "Entity Type", "Count", "Handles"])
+    unrecognized_df = None
+    if unrecognized_rows is not None:
+        unrecognized_df = pd.DataFrame(unrecognized_rows, columns=["Layer", "Block", "Count", "MEP Layer"])
+    block_df = None
+    if block_rows is not None:
+        block_df = pd.DataFrame(block_rows, columns=["Block", "Inserts", "Pipe Entities", "Length (m)"]).rename(columns={"Length (m)": length_column})
 
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -187,6 +209,10 @@ def build_takeoff_excel(
             warnings_df.to_excel(writer, sheet_name="ПРЕДУПРЕЖДЕНИЯ", index=False)
         if unsupported_df is not None:
             unsupported_df.to_excel(writer, sheet_name="НЕ ИЗМЕРЕНО", index=False)
+        if unrecognized_df is not None:
+            unrecognized_df.to_excel(writer, sheet_name="НЕ РАСПОЗНАНО", index=False)
+        if block_df is not None:
+            block_df.to_excel(writer, sheet_name="БЛОКИ С ТРУБАМИ", index=False)
 
     return buffer.getvalue()
 
