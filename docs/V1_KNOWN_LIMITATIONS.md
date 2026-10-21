@@ -23,6 +23,8 @@ in code.
 | ENG-13 | Are closed polylines and full-circle arcs on pipe layers pipe? | count; exclude; per-layer rule | Counted (V0), flagged for review | `CLOSED_POLYLINE`, `FULL_CIRCLE_ARC` flags, review length |
 | ENG-14 | Should frozen/off pipe layers be counted? | count; exclude | Counted (V0) | `HIDDEN_PIPE_LAYER_COUNTED` |
 | ENG-15 | Are quantities from a recovered (damaged) drawing acceptable? | accept with review; reject | Calculated, marked recovered | `DRAWING_RECOVERED`, `Load Mode` |
+| ENG-16 | Which layers of other layer standards (e.g. `P-PIPE-…`) are pipe runs? | per-project rule profile; manual selection per drawing | Only the `П_Трубы` rule by default; other layers only by explicit user selection | `PIPE_LIKE_LAYER_NOT_INCLUDED`, multiselect, sheet `ТРУБНЫЕ СЛОИ` |
+| ENG-17 | How should pipes drawn as two wall lines be measured? | derive centreline; halve the paired length; measure a separate centreline layer | Both walls counted as drawn when the layer is selected; never corrected | `DOUBLE_LINE_PIPE` |
 
 ## Technical limitations (LIM)
 
@@ -43,3 +45,5 @@ in code.
 | LIM-13 | Stored uploads are kept indefinitely in `data/input/`; no retention policy. | Operations only |
 | LIM-14 | The Streamlit configuration disables XSRF protection (V0 setting); acceptable only for a single-user local pilot. | Operations only |
 | LIM-15 | Results on the private project drawing have not been verified in this release (the drawing was not available to CI). | Release checklist |
+| LIM-16 | `DOUBLE_LINE_PIPE` uses straight segments only (arcs are not paired) and a fixed distance limit (0.3 m; 300 drawing units when units are unknown). Parallel single-line pipes closer than the limit are flagged too; double lines farther apart are not. | Warning text |
+| LIM-17 | `PIPE_LIKE_LAYER_NOT_INCLUDED` matches names containing `pipe` or `труб` only; other naming conventions are not detected. | This document only |

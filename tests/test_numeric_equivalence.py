@@ -49,7 +49,15 @@ pytestmark = pytest.mark.skipif(
     reason="NOT RUN: MEP_BASELINE_DIR (app.py and excel_export.py from main) is not set; CI sets it",
 )
 
-V1_REPORT_KEYS = {"warnings", "unsupported_pipe_entities", "xrefs", "unrecognized_inserts", "pipe_geometry_in_blocks", "pipe_layer_findings"}
+V1_REPORT_KEYS = {
+    "warnings",
+    "unsupported_pipe_entities",
+    "xrefs",
+    "unrecognized_inserts",
+    "pipe_geometry_in_blocks",
+    "pipe_layer_findings",
+    "pipe_layer_rows",
+}
 V1_IGNORED_PATHS = {"debug.notes"}
 LABEL_KEYS = {"Diameter", "Nearest Marker Label"}
 PLACEHOLDER_REMOVAL_DIFF = ["debug.unknown_dn_count", "pipe_by_diameter_rows", "pipe_rows"]
@@ -403,7 +411,7 @@ def _main_excel_call(excel_module, report, layer, display_unit):
     )
 
 
-V1_EXCEL_SHEETS = ["БЛОКИ С ТРУБАМИ", "НЕ ИЗМЕРЕНО", "НЕ РАСПОЗНАНО", "ПРЕДУПРЕЖДЕНИЯ"]
+V1_EXCEL_SHEETS = ["БЛОКИ С ТРУБАМИ", "НЕ ИЗМЕРЕНО", "НЕ РАСПОЗНАНО", "ПРЕДУПРЕЖДЕНИЯ", "ТРУБНЫЕ СЛОИ"]
 
 
 def test_app_excel_matches_main_for_known_units(baseline_app, baseline_excel, validation):

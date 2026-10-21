@@ -4,6 +4,7 @@ import contextlib
 import math
 import re
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 
 import matplotlib
@@ -39,7 +40,9 @@ from mep_takeoff.diagnostics import (
     length_unit,
     pipe_geometry_in_blocks,
     pipe_layer_findings,
+    pipe_like_layers_not_included,
     polyline_is_closed,
+    possible_double_lines,
     takeoff_warnings,
     unsupported_pipe_entities,
     xref_dependent_layer_count,
@@ -92,6 +95,10 @@ DXF_MARKER_CELL_SIZE = 5000.0
 DXF_MARKER_BASE_THRESHOLD = 3000.0
 DXF_MARKER_BASE_THRESHOLD_M = 3.0
 DXF_MARKER_CELL_SIZE_M = 5.0
+DOUBLE_LINE_MAX_OFFSET_M = 0.3
+DOUBLE_LINE_MAX_OFFSET_UNKNOWN_UNITS = 300.0
+PIPE_LAYER_MODE_DEFAULT = "default"
+PIPE_LAYER_MODE_MANUAL = "manual"
 LENGTH_BASIS_PLAN = "plan (XY projection)"
 GEOMETRY_STATUS_MEASURED = "MEASURED"
 GEOMETRY_STATUS_REVIEW = "REVIEW"
@@ -795,6 +802,37 @@ def _is_dxf_pipe_layer(layer_name: str) -> bool:
     return layer_name.startswith(DXF_PIPE_LAYER_PREFIX) and layer_name not in DXF_PIPE_LAYER_EXCLUDES
 
 
+def _pipe_layer_rule(pipe_layers: Iterable[str] | None):
+    """None keeps the project rule; an explicit selection includes exactly the chosen layers."""
+
+    if pipe_layers is None:
+        return _is_dxf_pipe_layer
+    selected = frozenset(pipe_layers)
+    return lambda layer_name: layer_name in selected
+
+
+def dxf_layer_names(doc) -> list[str]:
+    names = {str(layer.dxf.name) for layer in doc.layers}
+    names.update(_dxf_layer_name(entity) for entity in doc.modelspace())
+    return sorted(names)
+
+
+def default_pipe_layers(layer_names: Iterable[str]) -> list[str]:
+    return [name for name in layer_names if _is_dxf_pipe_layer(name)]
+
+
+def _double_line_max_offset(meters_per_unit: float | None) -> float:
+    if meters_per_unit:
+        return DOUBLE_LINE_MAX_OFFSET_M / meters_per_unit
+    return DOUBLE_LINE_MAX_OFFSET_UNKNOWN_UNITS
+
+
+def _double_line_offset_text(meters_per_unit: float | None) -> str:
+    if meters_per_unit:
+        return f"{DOUBLE_LINE_MAX_OFFSET_M:g} м"
+    return f"{DOUBLE_LINE_MAX_OFFSET_UNKNOWN_UNITS:g} ед. чертежа (единицы не определены, порог как для мм)"
+
+
 def _is_measured_entity(entity) -> bool:
     _raw_length, measurable, ignored = measure_entity(entity)
     return measurable and not ignored
@@ -1309,7 +1347,9 @@ def calculate_dxf_quantities(
     meters_per_unit: float | None,
     remove_duplicate_geometry: bool = True,
     load_info: dict | None = None,
+    pipe_layers: Iterable[str] | None = None,
 ) -> dict:
+    is_pipe_layer = _pipe_layer_rule(pipe_layers)
     entities = list(doc.modelspace())
     diameter_markers = _dxf_diameter_markers(entities)
     marker_threshold, marker_cell_size = _marker_settings(
@@ -1320,18 +1360,18 @@ def calculate_dxf_quantities(
     raw_entity_count = len(entities)
     raw_prefixed_pipe_geometry_entities = [
         entity for entity in entities
-        if _dxf_layer_name(entity).startswith(DXF_PIPE_LAYER_PREFIX)
+        if (_dxf_layer_name(entity).startswith(DXF_PIPE_LAYER_PREFIX) or is_pipe_layer(_dxf_layer_name(entity)))
         and entity.dxftype() in PIPE_ENTITY_TYPES
         and measure_entity(entity)[1]
         and not measure_entity(entity)[2]
     ]
     raw_pipe_layer_entities = [
         entity for entity in entities
-        if _is_dxf_pipe_layer(_dxf_layer_name(entity)) and entity.dxftype() in PIPE_ENTITY_TYPES
+        if is_pipe_layer(_dxf_layer_name(entity)) and entity.dxftype() in PIPE_ENTITY_TYPES
     ]
     excluded_pipe_geometry_entities = [
         entity for entity in raw_prefixed_pipe_geometry_entities
-        if not _is_dxf_pipe_layer(_dxf_layer_name(entity))
+        if not is_pipe_layer(_dxf_layer_name(entity))
     ]
     after_auxiliary_filter = []
     for entity in raw_pipe_layer_entities:
@@ -1366,7 +1406,7 @@ def calculate_dxf_quantities(
 
         layer_name = _dxf_layer_name(entity)
         layer_counts[layer_name] += 1
-        if not _is_dxf_pipe_layer(layer_name):
+        if not is_pipe_layer(layer_name):
             continue
         raw_length, measurable, ignored = measure_entity(entity)
         if not measurable or ignored:
@@ -1620,12 +1660,12 @@ def calculate_dxf_quantities(
 
     unsupported_rows = unsupported_pipe_entities(
         entities,
-        is_pipe_layer=_is_dxf_pipe_layer,
+        is_pipe_layer=is_pipe_layer,
         layer_of=_dxf_layer_name,
         is_measured=_is_measured_entity,
     )
 
-    blocks = pipe_geometry_in_blocks(doc, is_pipe_layer=_is_dxf_pipe_layer, layer_of=_dxf_layer_name, measure=measure_entity)
+    blocks = pipe_geometry_in_blocks(doc, is_pipe_layer=is_pipe_layer, layer_of=_dxf_layer_name, measure=measure_entity)
     block_rows = [
         {
             "Block": row["Block"],
@@ -1645,7 +1685,7 @@ def calculate_dxf_quantities(
             "Length (m)": round(convert_length(row["Length (du)"], meters_per_unit), 6),
         }
         for row in pipe_layer_findings(
-            doc, entities, is_pipe_layer=_is_dxf_pipe_layer, layer_of=_dxf_layer_name, measure=measure_entity, prefix=DXF_PIPE_LAYER_PREFIX
+            doc, entities, is_pipe_layer=is_pipe_layer, layer_of=_dxf_layer_name, measure=measure_entity, prefix=DXF_PIPE_LAYER_PREFIX
         )
     ]
     unrecognized_rows = [
@@ -1654,10 +1694,72 @@ def calculate_dxf_quantities(
     ]
     across_layer_length = convert_length(overlaps.across_layers_length + arc_copy_length_du, meters_per_unit)
     total_pipe_length_3d = math.fsum(pipe_lengths_3d)
+
+    all_layer_names = sorted({str(layer.dxf.name) for layer in doc.layers} | {_dxf_layer_name(entity) for entity in entities})
+    role_layers = DXF_PIPE_LAYER_EXCLUDES | {DXF_DIAMETER_LAYER} | DXF_EQUIPMENT_LAYERS | DXF_FITTING_LAYERS | DXF_VALVE_LAYERS
+    reported_by_name_review = {row["Layer"] for row in layer_findings if not row["Included"]}
+    pipe_like_rows = pipe_like_layers_not_included(
+        entities,
+        all_layer_names,
+        is_pipe_layer=is_pipe_layer,
+        layer_of=_dxf_layer_name,
+        measure=measure_entity,
+        skip=role_layers | reported_by_name_review,
+    )
+    double_line_max_offset = _double_line_max_offset(meters_per_unit)
+    double_lines = possible_double_lines(unique_by_layer, double_line_max_offset)
+    pipe_like_names = {row["Layer"] for row in pipe_like_rows}
+    pipe_like_entities: dict[str, list] = defaultdict(list)
+    for entity in entities:
+        if _dxf_layer_name(entity) in pipe_like_names and _is_measured_entity(entity):
+            pipe_like_entities[_dxf_layer_name(entity)].append(entity)
+    pipe_like_double_lines = possible_double_lines(pipe_like_entities, double_line_max_offset)
+
+    manual_selection = pipe_layers is not None
+    included_layers = [name for name in all_layer_names if is_pipe_layer(name)]
+    if manual_selection:
+        pipe_layers_label = f"выбраны вручную: {', '.join(included_layers) or 'нет'}"
+    else:
+        pipe_layers_label = f"{DXF_PIPE_LAYER_PREFIX}*, кроме {', '.join(sorted(DXF_PIPE_LAYER_EXCLUDES))}"
+    measurable_by_layer: dict[str, list] = defaultdict(lambda: [0, 0.0])
+    for entity in entities:
+        raw_length, measurable, ignored = measure_entity(entity)
+        if measurable and not ignored:
+            measurable_by_layer[_dxf_layer_name(entity)][0] += 1
+            measurable_by_layer[_dxf_layer_name(entity)][1] += raw_length
+    pipe_entities_per_layer = Counter(row["Layer"] for row in pipe_detail_rows)
+    pipe_layer_rows = [
+        {
+            "Layer": name,
+            "Included": "да",
+            "Basis": "выбран вручную" if manual_selection else f"правило {DXF_PIPE_LAYER_PREFIX}*",
+            "Entities": int(layer_counts.get(name, 0)),
+            "Measurable Entities": measurable_by_layer[name][0],
+            "Raw Length (du)": round(measurable_by_layer[name][1], 6),
+            "Pipe Entities": int(pipe_entities_per_layer.get(name, 0)),
+            "Length (m)": round(layer_measured_length.get(name, 0.0), 6),
+            "Possible Double-Line Segments": double_lines.by_layer.get(name, (0, 0.0))[0],
+        }
+        for name in included_layers
+    ] + [
+        {
+            "Layer": row["Layer"],
+            "Included": "нет",
+            "Basis": "название похоже на трубы — не включён",
+            "Entities": row["Entities"],
+            "Measurable Entities": row["Measurable Entities"],
+            "Raw Length (du)": round(row["Raw Length (du)"], 6),
+            "Pipe Entities": 0,
+            "Length (m)": 0.0,
+            "Possible Double-Line Segments": pipe_like_double_lines.by_layer.get(row["Layer"], (0, 0.0))[0],
+        }
+        for row in pipe_like_rows
+    ]
+
     warnings = takeoff_warnings(
         meters_per_unit=meters_per_unit,
         pipe_entity_count=pipe_entity_count,
-        pipe_layers_label=f"{DXF_PIPE_LAYER_PREFIX}*, кроме {', '.join(sorted(DXF_PIPE_LAYER_EXCLUDES))}",
+        pipe_layers_label=pipe_layers_label,
         unsupported_rows=unsupported_rows,
         xref_rows=xref_rows,
         xref_layer_count=xref_dependent_layer_count(doc),
@@ -1674,6 +1776,9 @@ def calculate_dxf_quantities(
         anonymous_inserts=anonymous_inserts,
         layer_findings=layer_findings,
         load_info=load_info,
+        pipe_like_layers=pipe_like_rows,
+        double_lines=(double_lines.segment_count, convert_length(double_lines.length, meters_per_unit), double_lines.offsets),
+        double_line_max_offset=_double_line_offset_text(meters_per_unit),
     )
     review_handles = {row["Handle"] for row in pipe_detail_rows if row["Geometry Flags"]}
 
@@ -1708,6 +1813,10 @@ def calculate_dxf_quantities(
             "unrecognized_insert_count": int(sum(row["Count"] for row in unrecognized_rows)),
             "warning_count": len(warnings),
             "load_mode": (load_info or {}).get("mode", "strict"),
+            "pipe_layer_mode": PIPE_LAYER_MODE_MANUAL if manual_selection else PIPE_LAYER_MODE_DEFAULT,
+            "pipe_layers": included_layers,
+            "possible_double_line_segments": double_lines.segment_count,
+            "possible_double_line_length": convert_length(double_lines.length, meters_per_unit),
         },
         "pipe_rows": pipe_rows,
         "pipe_by_diameter_rows": pipe_by_diameter_rows,
@@ -1725,6 +1834,7 @@ def calculate_dxf_quantities(
         "unrecognized_inserts": unrecognized_rows,
         "pipe_geometry_in_blocks": block_rows,
         "pipe_layer_findings": layer_findings,
+        "pipe_layer_rows": pipe_layer_rows,
     }
 
 
@@ -1793,6 +1903,9 @@ def build_dxf_takeoff_excel(*, file_name: str, report: dict, layer_calculation: 
                 "Unrecognized Blocks": summary.get("unrecognized_insert_count", 0),
                 "Warnings": summary.get("warning_count", len(report.get("warnings", []))),
                 "Load Mode": summary.get("load_mode", "strict"),
+                "Pipe Layer Mode": summary.get("pipe_layer_mode", PIPE_LAYER_MODE_DEFAULT),
+                "Pipe Layers": ", ".join(summary.get("pipe_layers", [])),
+                "Possible Double-Line Segments": summary.get("possible_double_line_segments", 0),
             }
         ],
         pipe_by_diameter_rows=report["pipe_by_diameter_rows"],
@@ -1813,6 +1926,7 @@ def build_dxf_takeoff_excel(*, file_name: str, report: dict, layer_calculation: 
         unsupported_rows=report.get("unsupported_pipe_entities", []),
         unrecognized_rows=report.get("unrecognized_inserts", []),
         block_rows=report.get("pipe_geometry_in_blocks", []),
+        pipe_layer_rows=report.get("pipe_layer_rows", []),
         length_unit_known=length_unit_known,
     )
 
@@ -2023,11 +2137,31 @@ def main() -> None:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     elif drawing_kind == "dxf":
+        layer_choices = dxf_layer_names(doc)
+        default_layers = default_pipe_layers(layer_choices)
+        chosen_layers = st.multiselect(
+            "Трубные слои в метраже",
+            layer_choices,
+            default=default_layers,
+            key=f"pipe_layers_{st.session_state.get('upload_signature')}",
+            help=(
+                f"По умолчанию: {DXF_PIPE_LAYER_PREFIX}*, кроме {', '.join(sorted(DXF_PIPE_LAYER_EXCLUDES))}. "
+                "Другие слои включаются только вашим явным выбором."
+            ),
+        )
+        pipe_layers = None if set(chosen_layers) == set(default_layers) else sorted(chosen_layers)
+        if pipe_layers is not None:
+            st.info(
+                "Трубные слои выбраны вручную — результат отличается от правила по умолчанию. "
+                "Выбранный слой может быть начерчен двумя параллельными линиями (стенки трубы): тогда метраж завышен "
+                "примерно вдвое. Осевая линия автоматически не строится, длина не корректируется и не оценивается."
+            )
         report_key = report_cache_key(
             st.session_state.get("upload_signature"),
             st.session_state.get("unit_override", "Auto"),
             insunits.get("code"),
             st.session_state.get("remove_duplicate_geometry", True),
+            None if pipe_layers is None else tuple(pipe_layers),
         )
         if st.button("Рассчитать MEP метраж", type="primary") or st.session_state.get("dxf_report") is None or st.session_state.get("dxf_report_key") != report_key:
             try:
@@ -2037,6 +2171,7 @@ def main() -> None:
                     meters_per_unit,
                     st.session_state.get("remove_duplicate_geometry", True),
                     load_info=st.session_state.get("load_info"),
+                    pipe_layers=pipe_layers,
                 )
                 st.session_state["dxf_report_key"] = report_key
             except Exception as error:
@@ -2060,6 +2195,23 @@ def main() -> None:
         st.write(f"Оборудование: {summary['equipment_count']}")
         st.write(f"Фитинги: {summary['fittings_count']}")
         st.write(f"Клапаны: {summary['valves_count']}")
+        if summary.get("pipe_layer_mode") == PIPE_LAYER_MODE_MANUAL:
+            st.write(f"Трубные слои: выбраны вручную — {', '.join(summary.get('pipe_layers', [])) or 'нет'}")
+        else:
+            st.write(f"Трубные слои: по умолчанию ({DXF_PIPE_LAYER_PREFIX}*) — {', '.join(summary.get('pipe_layers', [])) or 'нет'}")
+
+        pipe_layer_rows = report.get("pipe_layer_rows") or []
+        if pipe_layer_rows:
+            st.markdown("### Трубные слои")
+            st.dataframe(
+                pd.DataFrame(pipe_layer_rows).rename(columns={"Length (m)": length_header}),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.caption(
+                "В метраж входят только строки «да». Строки «нет» — слои с похожим названием, показаны для проверки. "
+                "«Возможные двойные линии» — отрезки с близким параллельным соседом; это вероятность, а не точное определение."
+            )
 
         render_takeoff_warnings(report, length_header)
 

@@ -35,6 +35,7 @@ Base: `main` @ `71d4762`. All work is on feature branches; nothing is merged or 
 | `51644db` | Equivalence tests bind `main`'s app to `main`'s geometry/dxf_reader/excel_export; collection errors reported | Test harness correctness |
 | `567f8ee` | Diameter rows sorted DN by size, Ø by size, UNKNOWN last | Row order only |
 | `161ec62` | Baseline modules registered before execution | Test harness correctness |
+| (this change) | User-selected pipe layers (default = `П_Трубы` rule), `PIPE_LIKE_LAYER_NOT_INCLUDED`, `DOUBLE_LINE_PIPE`, table/sheet `ТРУБНЫЕ СЛОИ` | **Q**: none in default mode (verified identical on demo drawings and a real test drawing); manual selection changes the total by the chosen layers only. Warnings only |
 
 ## Intended changes versus `main` (synthetic evidence, EQ-INTENDED-*)
 

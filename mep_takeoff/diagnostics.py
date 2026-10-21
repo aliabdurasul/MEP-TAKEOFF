@@ -22,6 +22,10 @@ MAX_BLOCK_DEPTH = 4
 OVERLAP_ANGLE_TOLERANCE = 1e-7
 OVERLAP_OFFSET_TOLERANCE = 1e-3
 LENGTH_TOLERANCE = 1e-6
+DOUBLE_LINE_ANGLE_TOLERANCE = 1e-4
+DOUBLE_LINE_MIN_OVERLAP = 0.5
+DOUBLE_LINE_MIN_ASPECT = 2.0
+PIPE_LIKE_NAME_HINTS = ("pipe", "труб")
 
 LENGTH_UNIT_METRES = "m"
 LENGTH_UNIT_DRAWING = "drawing units"
@@ -233,6 +237,119 @@ def collinear_overlaps(entities_by_layer: dict[str, list]) -> OverlapSummary:
     )
 
 
+@dataclass(frozen=True)
+class _Segment:
+    handle: str
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+    ux: float
+    uy: float
+    length: float
+    angle: float
+    offset: float
+
+
+def _oriented_segment(handle: str, start, end) -> _Segment | None:
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    length = math.hypot(dx, dy)
+    if length <= LENGTH_TOLERANCE:
+        return None
+    ux, uy = dx / length, dy / length
+    angle = math.atan2(uy, ux)
+    if angle < 0:
+        angle += math.pi
+        ux, uy = -ux, -uy
+    if angle >= math.pi - DOUBLE_LINE_ANGLE_TOLERANCE:
+        angle -= math.pi
+        ux, uy = -ux, -uy
+    return _Segment(handle, start[0], start[1], end[0], end[1], ux, uy, length, angle, -uy * start[0] + ux * start[1])
+
+
+def _parallel_offset(a: _Segment, b: _Segment, max_offset: float) -> float | None:
+    """Distance between two parallel segments that run side by side, or None."""
+
+    if abs(a.ux * b.uy - a.uy * b.ux) > math.sin(DOUBLE_LINE_ANGLE_TOLERANCE):
+        return None
+    mid_x, mid_y = (b.x0 + b.x1) / 2.0, (b.y0 + b.y1) / 2.0
+    distance = abs(-a.uy * (mid_x - a.x0) + a.ux * (mid_y - a.y0))
+    if distance <= OVERLAP_OFFSET_TOLERANCE or distance > max_offset:
+        return None
+    t0 = a.ux * (b.x0 - a.x0) + a.uy * (b.y0 - a.y0)
+    t1 = a.ux * (b.x1 - a.x0) + a.uy * (b.y1 - a.y0)
+    shorter = min(a.length, b.length)
+    overlap = min(a.length, max(t0, t1)) - max(0.0, min(t0, t1))
+    if overlap < DOUBLE_LINE_MIN_OVERLAP * shorter or shorter < DOUBLE_LINE_MIN_ASPECT * distance:
+        return None
+    return distance
+
+
+@dataclass(frozen=True)
+class DoubleLineSummary:
+    segment_count: int
+    pair_count: int
+    length: float
+    handles: frozenset
+    by_layer: dict
+    offsets: tuple
+
+
+def possible_double_lines(entities_by_layer: dict[str, list], max_offset: float) -> DoubleLineSummary:
+    """Straight segments with a parallel neighbour on the same layer, at most ``max_offset`` away.
+
+    Such pairs may be the two walls of a pipe drawn as a double line, but parallel single-line
+    pipes look the same. Nothing is removed, merged or corrected (drawing units).
+    """
+
+    flagged: dict[tuple, _Segment] = {}
+    pair_count = 0
+    offsets: Counter = Counter()
+    for layer, entities in entities_by_layer.items():
+        segments: list[_Segment] = []
+        for entity in entities:
+            handle = str(entity.dxf.handle)
+            for start, end in straight_segments(entity):
+                segment = _oriented_segment(handle, start, end)
+                if segment is not None:
+                    segments.append(segment)
+        if len(segments) < 2:
+            continue
+        reach = max(max(abs(s.x0), abs(s.y0), abs(s.x1), abs(s.y1)) for s in segments)
+        window = max_offset + 2.0 * DOUBLE_LINE_ANGLE_TOLERANCE * reach
+        buckets: dict[int, list[int]] = defaultdict(list)
+        for index, segment in enumerate(segments):
+            buckets[round(segment.angle / DOUBLE_LINE_ANGLE_TOLERANCE)].append(index)
+        for bucket, members in buckets.items():
+            combined = sorted(members + buckets.get(bucket + 1, []), key=lambda index: segments[index].offset)
+            own = set(members)
+            for position, first in enumerate(combined):
+                for second in combined[position + 1:]:
+                    if segments[second].offset - segments[first].offset > window:
+                        break
+                    if first not in own and second not in own:
+                        continue
+                    distance = _parallel_offset(segments[first], segments[second], max_offset)
+                    if distance is None:
+                        continue
+                    pair_count += 1
+                    offsets[round(distance, 1)] += 1
+                    for index in (first, second):
+                        flagged[(layer, index)] = segments[index]
+    by_layer: dict[str, list] = defaultdict(lambda: [0, 0.0])
+    for (layer, _index), segment in flagged.items():
+        by_layer[layer][0] += 1
+        by_layer[layer][1] += segment.length
+    return DoubleLineSummary(
+        segment_count=len(flagged),
+        pair_count=pair_count,
+        length=math.fsum(segment.length for segment in flagged.values()),
+        handles=frozenset(segment.handle for segment in flagged.values()),
+        by_layer={layer: tuple(values) for layer, values in by_layer.items()},
+        offsets=tuple(offset for offset, _count in offsets.most_common(5)),
+    )
+
+
 def identical_arcs_across_layers(entities_by_layer: dict[str, list], measure: Callable[[Any], float]) -> tuple[int, float, frozenset]:
     """Identical ARCs on different pipe layers: extra copies and their length (drawing units)."""
 
@@ -365,6 +482,42 @@ def pipe_layer_findings(doc: Any, entities: Iterable[Any], *, is_pipe_layer, lay
     return findings
 
 
+def is_pipe_like_name(name: str) -> bool:
+    folded = name.casefold()
+    return any(hint in folded for hint in PIPE_LIKE_NAME_HINTS)
+
+
+def pipe_like_layers_not_included(
+    entities: Iterable[Any],
+    layer_names: Iterable[str],
+    *,
+    is_pipe_layer: Callable[[str], bool],
+    layer_of: Callable[[Any], str],
+    measure,
+    skip: Iterable[str] = (),
+) -> list[dict[str, Any]]:
+    """Layers whose name looks like pipe (PIPE, Труб) that the takeoff does not include but that hold
+    measurable geometry. A name match is only a hint for review (drawing units)."""
+
+    skipped = set(skip)
+    totals: dict[str, list] = defaultdict(lambda: [0, 0, 0.0])
+    for entity in entities:
+        layer = layer_of(entity)
+        totals[layer][0] += 1
+        raw_length, measurable, ignored = measure(entity)
+        if measurable and not ignored:
+            totals[layer][1] += 1
+            totals[layer][2] += raw_length
+    rows = []
+    for name in sorted(set(layer_names) | set(totals)):
+        if name in skipped or is_pipe_layer(name) or not is_pipe_like_name(name):
+            continue
+        count, measurable, length = totals.get(name, [0, 0, 0.0])
+        if measurable:
+            rows.append({"Layer": name, "Entities": count, "Measurable Entities": measurable, "Raw Length (du)": length})
+    return rows
+
+
 # --- warnings ------------------------------------------------------------------------------------
 
 
@@ -397,6 +550,9 @@ def takeoff_warnings(
     anonymous_inserts: int = 0,
     layer_findings: list[dict[str, Any]] | None = None,
     load_info: dict[str, Any] | None = None,
+    pipe_like_layers: list[dict[str, Any]] | None = None,
+    double_lines: tuple[int, float, tuple] = (0, 0.0, ()),
+    double_line_max_offset: str = "",
 ) -> list[dict[str, Any]]:
     """Build the user-visible warnings. Lengths are in report units (metres or drawing units)."""
 
@@ -611,6 +767,38 @@ def takeoff_warnings(
                 len(hidden_findings),
                 f"Замороженные или отключённые трубные слои включены в метраж: {layers}.",
                 sum(float(row["Length (m)"]) for row in hidden_findings),
+            )
+        )
+
+    if pipe_like_layers:
+        details = "; ".join(
+            f"{row['Layer']}: объектов {row['Entities']}, измеряемых {row['Measurable Entities']}, "
+            f"сырая длина {row['Raw Length (du)']:,.3f} ед. чертежа"
+            for row in pipe_like_layers
+        )
+        warnings.append(
+            _warning(
+                "PIPE_LIKE_LAYER_NOT_INCLUDED",
+                len(pipe_like_layers),
+                f"Слои с названием, похожим на трубы, не входят в метраж: {details}. "
+                "Это только совпадение по имени, а не подтверждение, что это трубы. "
+                "Чтобы включить слой, выберите его вручную в списке трубных слоёв и проверьте результат.",
+            )
+        )
+
+    count, length, offsets = double_lines
+    if count:
+        typical = ", ".join(f"{offset:g}" for offset in offsets)
+        warnings.append(
+            _warning(
+                "DOUBLE_LINE_PIPE",
+                count,
+                f"{count} отрезк(ов) на трубных слоях ({_length_text(length, meters_per_unit)}) имеют параллельного соседа "
+                f"на расстоянии до {double_line_max_offset} (типичные расстояния, ед. чертежа: {typical}). "
+                "Возможно, труба начерчена двумя линиями (стенками) — тогда метраж завышен примерно вдвое. "
+                "Это вероятность, а не точное определение: параллельные трубы (например, подача и обратка) дают то же. "
+                "Линии не удаляются и не объединяются, длина не исправляется — проверьте чертёж.",
+                length,
             )
         )
 

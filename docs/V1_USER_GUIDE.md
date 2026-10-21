@@ -25,22 +25,28 @@ are never sent anywhere.
      result against the original drawing.
 2. **Check units.** "Единицы чертежа" shows `$INSUNITS`. If it is unknown, lengths stay in
    drawing units (never labelled as metres). Choose the unit in the sidebar to convert.
-3. **Read "Общий результат".**
+3. **Check "Трубные слои в метраже".** The default is the project rule (`П_Трубы*`, except
+   the centreline layer). Add another layer (for example `P-PIPE-…`) only if you know it holds
+   pipe runs. Pipes drawn as two wall lines are then counted about twice — watch for
+   `DOUBLE_LINE_PIPE`; no centreline is derived and no length is corrected. The table
+   "Трубные слои" shows which layers are in the total ("да") and which only look like pipe ("нет").
+4. **Read "Общий результат".**
    * *Общая длина труб* — plan (XY) length of measured pipe geometry.
    * *3D-длина* — true length including height changes (differs only if Z varies).
    * *Без диаметра (UNKNOWN)* — length without an assigned diameter.
    * *Геометрия для проверки* — length of entities flagged for review.
    * *Неизмеренные объекты* — entities on pipe layers that were not measured.
-4. **Read "Предупреждения".** Each warning has a code (table below). Tables list unmeasured
+5. **Read "Предупреждения".** Each warning has a code (table below). Tables list unmeasured
    entities, XREFs, pipe geometry inside blocks, unrecognised blocks and pipe layers to check.
-5. **Review "Трубы по диаметрам".**
+   Warnings describe possibilities that need review, not confirmed findings.
+6. **Review "Трубы по диаметрам".**
    * `Ø16` = outside diameter written on the drawing; `DN16` = nominal size. They are never
      converted into each other.
    * Order: DN by size, Ø by size, then UNKNOWN.
-6. **Review the detail table.** `Geometry Flags` and `Geometry Status = REVIEW` mark
+7. **Review the detail table.** `Geometry Flags` and `Geometry Status = REVIEW` mark
    entities whose length is counted but needs an engineering check. `Diameter Candidates`
    lists markers that are near a pipe but were not used to assign its diameter.
-7. **Download Excel.** If the export fails, an error is shown and the on-screen results
+8. **Download Excel.** If the export fails, an error is shown and the on-screen results
    remain valid; run again to download.
 
 ## 3. Warning codes
@@ -65,6 +71,8 @@ are never sent anywhere.
 | `ANONYMOUS_BLOCKS_CLASSIFIED_BY_LAYER` | Dynamic blocks classified by layer only | Check equipment/fitting counts |
 | `PIPE_LAYER_NAME_REVIEW` | Centreline-like layer included or pipe-layer variant excluded | Check the layer standard (ENG-12) |
 | `HIDDEN_PIPE_LAYER_COUNTED` | Frozen/off pipe layer counted | Decide (ENG-14) |
+| `PIPE_LIKE_LAYER_NOT_INCLUDED` | A layer named like pipe (`PIPE`, `Труб`) has geometry but is not in the total | Select it in "Трубные слои в метраже" only if it holds pipe runs (ENG-16) |
+| `DOUBLE_LINE_PIPE` | Parallel lines close together on an included layer — possibly pipe walls (length ≈ ×2), or parallel pipes | Check the drawing; nothing is corrected automatically (ENG-17) |
 
 ## 4. Excel workbook
 
@@ -80,5 +88,6 @@ are never sent anywhere.
 | НЕ ИЗМЕРЕНО | Unmeasured entities on pipe layers |
 | НЕ РАСПОЗНАНО | Blocks not counted (with MEP-layer flag) |
 | БЛОКИ С ТРУБАМИ | Pipe-layer geometry inside blocks (not counted) |
+| ТРУБНЫЕ СЛОИ | Layers in the total ("да", with basis: rule or manual) and pipe-like layers left out ("нет"): entities, raw length, counted length, possible double-line segments |
 
 Length columns carry their unit (`м` or `ед. чертежа`).

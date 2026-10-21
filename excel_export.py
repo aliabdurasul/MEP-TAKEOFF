@@ -33,6 +33,7 @@ def build_takeoff_excel(
     unsupported_rows: list[dict[str, Any]] | None = None,
     unrecognized_rows: list[dict[str, Any]] | None = None,
     block_rows: list[dict[str, Any]] | None = None,
+    pipe_layer_rows: list[dict[str, Any]] | None = None,
     length_unit_known: bool = True,
 ) -> bytes:
     length_unit_ru = "м" if length_unit_known else "ед. чертежа"
@@ -189,6 +190,34 @@ def build_takeoff_excel(
     block_df = None
     if block_rows is not None:
         block_df = pd.DataFrame(block_rows, columns=["Block", "Inserts", "Pipe Entities", "Length (m)"]).rename(columns={"Length (m)": length_column})
+    pipe_layer_df = None
+    if pipe_layer_rows is not None:
+        pipe_layer_df = pd.DataFrame(
+            pipe_layer_rows,
+            columns=[
+                "Layer",
+                "Included",
+                "Basis",
+                "Entities",
+                "Measurable Entities",
+                "Raw Length (du)",
+                "Pipe Entities",
+                "Length (m)",
+                "Possible Double-Line Segments",
+            ],
+        ).rename(
+            columns={
+                "Layer": "Слой",
+                "Included": "В метраже",
+                "Basis": "Основание",
+                "Entities": "Объектов",
+                "Measurable Entities": "Измеряемых",
+                "Raw Length (du)": "Сырая длина (ед. чертежа)",
+                "Pipe Entities": "Труб в метраже",
+                "Length (m)": length_column,
+                "Possible Double-Line Segments": "Возможные двойные линии (отрезков)",
+            }
+        )
 
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -213,6 +242,8 @@ def build_takeoff_excel(
             unrecognized_df.to_excel(writer, sheet_name="НЕ РАСПОЗНАНО", index=False)
         if block_df is not None:
             block_df.to_excel(writer, sheet_name="БЛОКИ С ТРУБАМИ", index=False)
+        if pipe_layer_df is not None:
+            pipe_layer_df.to_excel(writer, sheet_name="ТРУБНЫЕ СЛОИ", index=False)
 
     return buffer.getvalue()
 

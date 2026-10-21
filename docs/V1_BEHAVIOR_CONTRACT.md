@@ -60,6 +60,9 @@ Affects: **Q** quantity (length), **C** classification (diameter/category), **N*
 | V1-LAYER-01 Inclusion | Name starts with `П_Трубы`, except exactly `П_Трубы_ Осевая линия` | Unchanged | Q | BEH-LAYER-01 | ENG-12 |
 | V1-LAYER-02 Suspicious names | Silent | Counted/excluded as before; warning `PIPE_LAYER_NAME_REVIEW` for included centreline-like names, excluded case variants and XREF-dependent pipe layers (with length) | UI X | KI-LAYER-01/02 | **ENG-12** |
 | V1-LAYER-03 Frozen/off pipe layers | Counted silently | Counted; warning `HIDDEN_PIPE_LAYER_COUNTED` | UI X | KI-LAYER-03 | **ENG-14** |
+| V1-LAYER-04 User-selected pipe layers | — | Multiselect "Трубные слои в метраже"; default = V1-LAYER-01 rule (quantities identical). Any other selection includes exactly the chosen layers (`Pipe Layer Mode = manual`); no layer is added automatically. Selection is tied to the upload's SHA-256, so new content starts from the default | Q (manual only) UI X | PLS-01…03, PLS-UI-01/02 | No |
+| V1-LAYER-05 Pipe-like layers outside the rule | Silent | Not counted; layers named like pipe (`pipe`, `труб`, any case) with measurable geometry get `PIPE_LIKE_LAYER_NOT_INCLUDED` (entities, measurable entities, raw length). Centreline, marker, equipment, fitting and valve layers are not reported. A name match is a hint, not a classification | UI X | PLW-01/02 | ENG-16 |
+| V1-LAYER-06 Possible double-line pipes | Silent | Straight segments on included pipe layers with a parallel neighbour on the same layer (≤ 0.3 m apart; 300 drawing units if units unknown; side by side over ≥ 50 % of the shorter segment; segment ≥ 2× the distance) get `DOUBLE_LINE_PIPE`. Nothing is removed, merged or corrected; no centreline is derived | UI X | DL-01…06 | **ENG-17** |
 
 ## 7. Diameters
 
@@ -107,7 +110,7 @@ Affects: **Q** quantity (length), **C** classification (diameter/category), **N*
 |---|---|---|---|---|---|
 | V1-OUT-01 No pipe geometry | Fake `UNKNOWN 0.0` row | No diameter rows; warning `NO_PIPE_GEOMETRY` | UI X | W-EMPTY-01…03, XLS-W-03, UI-W-02 | No |
 | V1-OUT-02 Summary | Total, counts | Adds length basis, 3D total, unknown-diameter length, review length, unmeasured entity count, block pipe length, unrecognised block count, warning count, load mode | UI X | V1-OUT-02, KI-POL-01, KI-3D-01 | No |
-| V1-OUT-03 Excel compatibility | — | All V0 sheets and columns keep their values for known units; V1 adds columns (`Тип диаметра`, `Длина 3D`, summary fields) and sheets `ПРЕДУПРЕЖДЕНИЯ`, `НЕ ИЗМЕРЕНО`, `НЕ РАСПОЗНАНО`, `БЛОКИ С ТРУБАМИ` | X | XLS-01…17, XLS-W-01…04, EQ-XLS-01/02 | No |
+| V1-OUT-03 Excel compatibility | — | All V0 sheets and columns keep their values for known units; V1 adds columns (`Тип диаметра`, `Длина 3D`, summary fields incl. `Pipe Layer Mode`, `Pipe Layers`) and sheets `ПРЕДУПРЕЖДЕНИЯ`, `НЕ ИЗМЕРЕНО`, `НЕ РАСПОЗНАНО`, `БЛОКИ С ТРУБАМИ`, `ТРУБНЫЕ СЛОИ` | X | XLS-01…17, XLS-W-01…04, EQ-XLS-01/02 | No |
 | V1-OUT-04 UI = Excel | — | Diameter rows and warning codes in the UI equal the workbook | UI X | WF-07 | No |
 | V1-OUT-05 Export failure | Uncaught exception | Error shown, on-screen results kept, download offered again on the next successful run | UI X | WF-06 | No |
 | V1-OUT-06 Warnings visible | Partial | Every warning shown in the UI ("Предупреждения") and in sheet `ПРЕДУПРЕЖДЕНИЯ` with code, count, length and message | UI X | UI-W-01…05, WF-07…09 | No |
