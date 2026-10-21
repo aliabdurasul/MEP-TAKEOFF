@@ -993,6 +993,18 @@ def _normalize_dxf_diameter_label(text: str) -> str | None:
     return f"{prefix}{diameter_text}"
 
 
+def _diameter_sort_key(label: str) -> tuple:
+    """DN sizes by value, then Ø sizes by value, then UNKNOWN."""
+
+    for order, prefix in ((0, "DN"), (1, "Ø")):
+        if label.startswith(prefix):
+            try:
+                return (order, float(label[len(prefix):]), label)
+            except ValueError:
+                return (order, math.inf, label)
+    return (2, math.inf, label)
+
+
 def _diameter_type(label: str) -> str:
     if label.startswith("Ø"):
         return DIAMETER_TYPE_OUTSIDE
@@ -1483,7 +1495,7 @@ def calculate_dxf_quantities(
 
     pipe_rows = [
         {"Diameter": diameter, "Diameter Type": _diameter_type(diameter), "Length (m)": round(total, 6)}
-        for diameter, total in sorted(pipes_by_diameter.items(), key=lambda item: item[0])
+        for diameter, total in sorted(pipes_by_diameter.items(), key=lambda item: _diameter_sort_key(item[0]))
     ]
 
     total_pipe_length = math.fsum(value for value in pipes_by_diameter.values() if math.isfinite(value))
