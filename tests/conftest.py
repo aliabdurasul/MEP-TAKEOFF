@@ -34,6 +34,7 @@ KINDS = {
     "UPLOAD": "upload storage and cache reliability",
     "WARNING": "user-visible warnings and unit labels (no quantity change)",
     "EQUIVALENCE": "quantities identical to the calculation on main",
+    "IMPACT": "read-only known-issue impact analysis (no quantity change)",
 }
 
 
