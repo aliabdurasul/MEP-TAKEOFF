@@ -70,6 +70,7 @@ BASELINE_DEPENDENCIES = ("geometry", "dxf_reader", "excel_export")
 def _load(module_name: str, file_name: str):
     spec = importlib.util.spec_from_file_location(module_name, BASELINE_DIR / file_name)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
