@@ -22,9 +22,11 @@ Do not tag, merge or deploy until every blocking item is checked and approved.
       `python tools/impact_analysis.py data/input/MIR_OT_ANTP_R22_K2_8.dxf --output data/output/impact_v1.md`
       and record: bulge-differing polylines kept, MINSERT instances, OCS entities,
       unit-aware threshold (3 m), overlaps, block pipe length, unrecognised blocks.
-- [ ] **Compare V1 with V0 on the private drawing**: total length, per-diameter lengths
-      (DN↔Ø label mapping only), equipment/fitting/valve counts. Every difference must map
-      to a rule in `V1_CHANGELOG.md`.
+- [ ] **Compare V1 with V0 on the private drawing** with `tools/compare_v0_v1.py`
+      (procedure: `V1_PRIVATE_VERIFICATION.md`). The verdict must be
+      "ALL DIFFERENCES EXPLAINED"; every difference maps to a rule in `V1_CHANGELOG.md`.
+- [ ] **Pilot safeguards** applied on the pilot machine (local-only address, XSRF/CORS on,
+      upload retention procedure) — `V1_PRIVATE_VERIFICATION.md` §5.
 - [ ] **Engineering sign-off** recorded for the decisions needed for the pilot scope
       (at least ENG-01, ENG-05, ENG-12, ENG-13; see `V1_KNOWN_LIMITATIONS.md`).
 - [ ] Manual UI check in a browser with the private drawing (warnings readable, Excel opens).
