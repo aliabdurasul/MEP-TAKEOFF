@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  PYTHONUTF8: "1"
+
 concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: true
@@ -16,6 +19,9 @@ jobs:
   pytest:
     name: pytest (${{ matrix.os }}, Python 3.11)
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      checks: write
     strategy:
       fail-fast: false
       matrix:
@@ -47,9 +53,12 @@ jobs:
           MEP_VALIDATION_REPORT: validation-report/${{ matrix.os }}.md
         run: python -m pytest
 
-      - name: Publish validation report as annotations
+      - name: Publish validation report
         if: always()
-        run: python .github/scripts/publish_validation_annotations.py validation-report/${{ matrix.os }}.json "${{ matrix.os }}"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python .github/scripts/publish_validation_report.py validation-report/${{ matrix.os }}.md "${{ matrix.os }}"
 
       - name: Upload validation report
         if: always()
@@ -62,6 +71,9 @@ jobs:
   stale-upload-reproduction:
     name: stale-upload bug reproduces with app.py from main
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v7
 
@@ -78,6 +90,9 @@ jobs:
 
       - name: Run the upload-flow test against main's app.py (must fail)
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           git fetch --no-tags --depth=1 origin main
           mkdir -p "$RUNNER_TEMP/legacy_app"
@@ -88,7 +103,7 @@ jobs:
             python -m pytest tests/test_app_upload_flow.py -p no:cacheprovider
           status=$?
           set -e
-          python .github/scripts/publish_validation_annotations.py "$RUNNER_TEMP/legacy-report/legacy.json" "main app.py (legacy)"
+          python .github/scripts/publish_validation_report.py "$RUNNER_TEMP/legacy-report/legacy.md" "main app.py (legacy)"
           if [ "$status" -eq 1 ]; then
             echo "main's app.py shows the previous drawing's total after a same-name re-upload (test failed as expected)."
           else
