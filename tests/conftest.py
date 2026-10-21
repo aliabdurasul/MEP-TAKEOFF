@@ -35,6 +35,8 @@ KINDS = {
     "WARNING": "user-visible warnings and unit labels (no quantity change)",
     "EQUIVALENCE": "quantities identical to the calculation on main",
     "IMPACT": "read-only known-issue impact analysis (no quantity change)",
+    "CONTRACT": "V1 behaviour contract rule (docs/V1_BEHAVIOR_CONTRACT.md)",
+    "WORKFLOW": "end-to-end Streamlit workflow (upload -> takeoff -> UI -> Excel)",
 }
 
 

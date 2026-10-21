@@ -100,8 +100,8 @@ def test_excel_unknown_units_not_labelled_metres(validation):
     validation.equal(
         "XLS-W-01",
         "Excel headers for unknown units",
-        expected=([], ["Диаметр", "Длина (ед. чертежа)", "Процент"], [5000.0]),
-        actual=(_metre_labelled_columns(sheets), list(by_diameter.columns), by_diameter.iloc[:, 1].tolist()),
+        expected=([], ["Диаметр", "Тип диаметра", "Длина (ед. чертежа)", "Процент"], [5000.0]),
+        actual=(_metre_labelled_columns(sheets), list(by_diameter.columns), by_diameter["Длина (ед. чертежа)"].tolist()),
         basis="$INSUNITS=0, LINE 5000 drawing units",
         kind="WARNING",
     )
@@ -113,7 +113,7 @@ def test_excel_known_units_headers_unchanged(validation):
     validation.equal(
         "XLS-W-02",
         "Excel headers for known units preserved",
-        expected=(["Диаметр", "Длина (м)", "Процент"], True, True, True),
+        expected=(["Диаметр", "Тип диаметра", "Длина (м)", "Процент"], True, True, True),
         actual=(
             list(sheets["ПО ДИАМЕТРУ"].columns),
             "Длина (м)" in sheets["ТРУБЫ"].columns,
@@ -160,7 +160,7 @@ def test_real_unknown_diameter_row_kept(validation):
     validation.equal(
         "W-EMPTY-03",
         "genuine UNKNOWN diameter row preserved",
-        expected=[{"Diameter": "UNKNOWN", "Length (m)": 5.0}],
+        expected=[{"Diameter": "UNKNOWN", "Diameter Type": "UNKNOWN", "Length (m)": 5.0}],
         actual=report["pipe_rows"],
         basis="LINE 5000 mm on П_Трубы, no marker",
         kind="WARNING",

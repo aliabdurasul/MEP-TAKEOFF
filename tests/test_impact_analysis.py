@@ -94,7 +94,7 @@ def test_full_circle_arcs_counted(validation):
 
 
 def test_bulge_blind_duplicate_removal_measured(validation):
-    """A removed polyline whose arcs differ from the kept copy is reported with its lost length."""
+    """After V1-DUP-01 no polyline whose arcs differ from a kept copy is removed (lost length 0)."""
     doc = new_doc(INSUNITS_MM)
     add_lwpolyline(doc, [(0, 0, 0), (2000, 0, 0)])
     add_lwpolyline(doc, [(0, 0, 1.0), (2000, 0, 0)])
@@ -103,9 +103,9 @@ def test_bulge_blind_duplicate_removal_measured(validation):
     validation.equal(
         "IMP-DUP-01",
         "lost length from bulge-blind duplicate removal",
-        expected=_amount(1, 1000.0 * math.pi),
+        expected=_amount(0, 0.0),
         actual=_analyse(doc)["KI-DUP"]["removed_polylines_with_different_bulges"],
-        basis="П_Трубы: straight + semicircle on same vertices (lost pi m); Опуск: semicircle + exact reverse (not counted)",
+        basis="П_Трубы: straight + semicircle on same vertices (both kept in V1); Опуск: semicircle + exact reverse (removed, same bulges)",
         kind="IMPACT",
     )
 
@@ -152,7 +152,7 @@ def test_marker_text_inventory(validation):
     validation.equal(
         "IMP-DIA-01",
         "marker inventory",
-        expected=({"OD (Ø/ø)": 2, "DN": 1}, {"%%c25": 1, "Ду15": 1}, 1, {"0": 1}),
+        expected=({"OD (Ø/ø)": 3, "DN": 2}, {}, 1, {"0": 1}),
         actual=(
             result["marker_symbols"],
             result["unparsed_diameter_like_texts"],
@@ -208,7 +208,7 @@ def test_marker_threshold_in_metres(validation):
     validation.equal(
         "IMP-DIA-04",
         "threshold 3000 drawing units in metres",
-        expected=(3.0, 3000.0),
+        expected=(3.0, 3.0),
         actual=(_analyse(mm_doc)["KI-DIA"]["marker_threshold_m"], _analyse(m_doc)["KI-DIA"]["marker_threshold_m"]),
         basis="$INSUNITS=4 and $INSUNITS=6",
         kind="IMPACT",
@@ -256,9 +256,9 @@ def test_block_counting_gaps(validation):
     validation.equal(
         "IMP-BLK-02",
         "block counting gaps",
-        expected=({"EQUIPMENT/Radiator": 5}, 1, {"Фильтр сетчатый": 1}, {VALVE_LAYER: 1}, 1),
+        expected=({"EQUIPMENT/Radiator": 6}, 1, {"Фильтр сетчатый": 1}, {VALVE_LAYER: 1}, 1),
         actual=(
-            result["minsert_instances_not_counted"],
+            result["minsert_instances"],
             result["equipment_tag_layer_inserts_counted_as_equipment"],
             result["valve_layer_inserts_dropped"],
             result["inserts_not_counted_by_layer"],

@@ -18,8 +18,8 @@ def _diameter_summary_rows(app_test):
     rows = []
     for frame in dataframes(app_test):
         columns = list(frame.columns)
-        if len(columns) == 2 and columns[0] == "Diameter":
-            rows.extend((str(diameter), float(length)) for diameter, length in frame.itertuples(index=False))
+        if len(columns) == 3 and columns[:2] == ["Diameter", "Diameter Type"]:
+            rows.extend((str(diameter), float(length)) for diameter, _type, length in frame.itertuples(index=False))
     return rows
 
 
@@ -94,7 +94,7 @@ def test_ui_clean_drawing_has_no_takeoff_warnings(tmp_path, monkeypatch, validat
     validation.equal(
         "UI-W-05",
         "UI: no false warnings",
-        expected=([], [], [("DN16", 2.0)]),
+        expected=([], [], [("Ø16", 2.0)]),
         actual=(exceptions(app_test), _codes_shown(app_test), _diameter_summary_rows(app_test)),
         basis="LINE 2000 mm + 'ø16' marker, $INSUNITS=4",
         kind="WARNING",

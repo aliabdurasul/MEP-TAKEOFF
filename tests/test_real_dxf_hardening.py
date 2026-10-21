@@ -41,11 +41,11 @@ def test_real_dxf_diameter_breakdown_matches_expected_values():
     report = app.calculate_dxf_quantities(doc, "m", insunits["meters_per_unit"])
     by_diameter = {row["Diameter"]: float(row["Length (m)"]) for row in report["pipe_rows"]}
 
-    assert abs(by_diameter["DN15"] - 77.455369) < 1e-3
-    assert abs(by_diameter["DN16"] - 1534.931168) < 1e-3
-    assert abs(by_diameter["DN20"] - 41.920497) < 1e-3
-    assert abs(by_diameter["DN25"] - 48.637282) < 1e-3
-    assert abs(by_diameter["DN76"] - 21.481290) < 1e-3
+    assert abs(by_diameter["Ø15"] - 77.455369) < 1e-3
+    assert abs(by_diameter["Ø16"] - 1534.931168) < 1e-3
+    assert abs(by_diameter["Ø20"] - 41.920497) < 1e-3
+    assert abs(by_diameter["Ø25"] - 48.637282) < 1e-3
+    assert abs(by_diameter["Ø76"] - 21.481290) < 1e-3
     assert abs(by_diameter["UNKNOWN"] - 290.710181) < 1e-3
 
 

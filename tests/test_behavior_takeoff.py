@@ -141,27 +141,28 @@ def test_layer_view_duplicate_lengths_units(validation):
 # --- B.7 diameter labels ----------------------------------------------------------------------
 
 LABEL_CASES = [
-    ("BEH-DIA-01", "ø16", "DN16"),
-    ("BEH-DIA-02", "Ø 20", "DN20"),
+    ("BEH-DIA-01", "ø16", "Ø16"),
+    ("BEH-DIA-02", "Ø 20", "Ø20"),
     ("BEH-DIA-03", "DN 25", "DN25"),
     ("BEH-DIA-04", "dn32", "DN32"),
-    ("BEH-DIA-05", "ø16x2,0", "DN16"),
-    ("BEH-DIA-06", "ø15,5", "DN15.5"),
-    ("BEH-DIA-07", "\\U+00F816", "DN16"),
-    ("BEH-DIA-08", "%%c16", None),
-    ("BEH-DIA-09", "Ду15", None),
+    ("BEH-DIA-05", "ø16x2,0", "Ø16"),
+    ("BEH-DIA-06", "ø15,5", "Ø15.5"),
+    ("BEH-DIA-07", "\\U+00F816", "Ø16"),
+    ("BEH-DIA-08", "%%c16", "Ø16"),
+    ("BEH-DIA-09", "Ду15", "DN15"),
     ("BEH-DIA-10", "d20", None),
     ("BEH-DIA-11", "16x2.0", None),
     ("BEH-DIA-12", '1/2"', None),
+    ("BEH-DIA-13", "⌀32", "Ø32"),
 ]
 
 
 @pytest.mark.parametrize(("case_id", "text", "expected"), LABEL_CASES)
 def test_diameter_label_parsing(validation, case_id, text, expected):
-    """V0 recognises only DN / Ø / ø followed by a number and always labels it 'DN<n>'."""
+    """V1 keeps the notation: Ø/ø/⌀/%%c give 'Ø<n>' (outside diameter), DN/Ду give 'DN<n>' (nominal size)."""
     validation.equal(
         case_id,
-        "diameter label regex (V0)",
+        "diameter label notation (V1-DIA-01/02)",
         expected=expected,
         actual=app._normalize_dxf_diameter_label(text),
         basis=f"marker text {text!r}",
@@ -182,10 +183,10 @@ def _pipe_with_marker(text="ø16", marker_at=(1000, 1000), height=2.5, marker_la
 @pytest.mark.parametrize(
     ("case_id", "marker_at", "height", "expected"),
     [
-        ("BEH-DIA-20", (1000, 1000), 2.5, ("DN16", 3000.0)),
-        ("BEH-DIA-21", (1000, 2999), 2.5, ("DN16", 3000.0)),
+        ("BEH-DIA-20", (1000, 1000), 2.5, ("Ø16", 3000.0)),
+        ("BEH-DIA-21", (1000, 2999), 2.5, ("Ø16", 3000.0)),
         ("BEH-DIA-22", (1000, 3001), 2.5, ("UNKNOWN", 3000.0)),
-        ("BEH-DIA-23", (1000, 3500), 500.0, ("DN16", 4000.0)),
+        ("BEH-DIA-23", (1000, 3500), 500.0, ("Ø16", 4000.0)),
     ],
 )
 def test_marker_distance_threshold(validation, case_id, marker_at, height, expected):
@@ -221,7 +222,7 @@ def test_mtext_marker(validation):
     """MTEXT markers are recognised like TEXT markers."""
     doc, handle = _pipe_with_marker(text="Ø25", mtext=True)
     row = _diameter_of(_takeoff(doc), handle)
-    validation.equal("BEH-DIA-26", "MTEXT marker", expected="DN25", actual=row["Diameter"], basis="MTEXT 'Ø25' 1000 mm from midpoint")
+    validation.equal("BEH-DIA-26", "MTEXT marker", expected="Ø25", actual=row["Diameter"], basis="MTEXT 'Ø25' 1000 mm from midpoint")
 
 
 # --- B.10 layer filters -----------------------------------------------------------------------
@@ -395,7 +396,7 @@ def excel_sheets():
 
 @pytest.mark.parametrize(
     ("case_id", "diameter", "expected"),
-    [("XLS-01", "DN16", EXCEL_DN16), ("XLS-02", "DN20", EXCEL_DN20), ("XLS-03", "UNKNOWN", EXCEL_UNKNOWN)],
+    [("XLS-01", "Ø16", EXCEL_DN16), ("XLS-02", "DN20", EXCEL_DN20), ("XLS-03", "UNKNOWN", EXCEL_UNKNOWN)],
 )
 def test_excel_length_by_diameter(excel_sheets, validation, case_id, diameter, expected):
     """'ПО ДИАМЕТРУ' sheet holds the analytic length per diameter (rounded to 6 decimals)."""
@@ -412,13 +413,13 @@ def test_excel_length_by_diameter(excel_sheets, validation, case_id, diameter, e
 
 
 def test_excel_diameter_total_and_percent(excel_sheets, validation):
-    """Diameter rows sum to the final length and DN16 percentage equals its analytic share."""
+    """Diameter rows sum to the final length and the Ø16 percentage equals its analytic share."""
     sheet = excel_sheets["ПО ДИАМЕТРУ"]
-    dn16_percent = sheet.loc[sheet["Диаметр"] == "DN16", "Процент"].iloc[0]
+    dn16_percent = sheet.loc[sheet["Диаметр"] == "Ø16", "Процент"].iloc[0]
     validation.close("XLS-04", "Excel diameter rows sum", expected=EXCEL_FINAL, actual=float(sheet["Длина (м)"].sum()), basis=EXCEL_BASIS, abs_tol=1e-6)
     validation.close(
         "XLS-05",
-        "Excel DN16 percentage",
+        "Excel Ø16 percentage",
         expected=EXCEL_DN16 / EXCEL_FINAL * 100.0,
         actual=float(dn16_percent),
         basis=EXCEL_BASIS + "; percentage rounded to 2 decimals",
